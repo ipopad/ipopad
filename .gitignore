@@ -1,0 +1,23 @@
+node_modules/
+data/
+web/dist/
+.env
+.env.local
+tools/grind/target/
+e2e/ledger/
+e2e/validator.log
+hk/hook/target/
+hk/keys/*.json
+data/
+RPC.txt
+
+# never public
+hk/keys/
+keys/
+*.keypair.json
+*.pem
+*.key
+alert.env
+gate.env
+HANDOFF.md
+deploy/

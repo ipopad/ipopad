@@ -1,0 +1,34 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ipo-remove-'));
+process.env.DB_PATH = path.join(dir, 'ipo.db');
+const { run, one } = await import('../api/db.mjs');
+const { removeCoin } = await import('../api/remove-coin.mjs');
+const { LOGO_DIR } = await import('../api/images.mjs');
+const { META_DIR } = await import('../api/launch.mjs');
+const coins = await import('../api/coins.mjs');
+const IMG = `${'a'.repeat(32)}.png`, META = `${'b'.repeat(32)}.json`;
+const row = (mint, launcher, origin = 'site', status = 'hidden') => run(`INSERT INTO launches (mint, launcher, name, symbol, metadata_uri, image, status, kind, origin, created_at, updated_at, bumped_at) VALUES (?, ?, 'Test', ?, ?, ?, ?, 'window', ?, 1, 1, 1)`, mint, launcher, mint.slice(0, 6).toUpperCase(), `https://x/meta/${META}`, `/api/logos/${IMG}`, status, origin);
+
+test('a finished test coin leaves the site completely; everything else is refused', async () => {
+  fs.mkdirSync(path.join(LOGO_DIR, 'sq'), { recursive: true });
+  fs.writeFileSync(path.join(LOGO_DIR, IMG), 'x'); fs.writeFileSync(path.join(LOGO_DIR, 'sq', `${'a'.repeat(32)}.webp`), 'x');
+  fs.writeFileSync(path.join(META_DIR, META), JSON.stringify({ image: `https://x/img/${IMG}` }));
+  row('testmint', 'walletA');
+  run("INSERT INTO trades (sig, mint, wallet, side, lamports, token_units, created_at) VALUES ('s', 'testmint', 'walletA', 'buy', '1', '1', 1)");
+  assert.throws(() => removeCoin({ mint: 'testmint', wallet: 'walletB', ledgerStatus: 'done' }), /refused/);
+  assert.throws(() => removeCoin({ mint: 'testmint', wallet: 'walletA', ledgerStatus: 'pushed' }), /has not finished/);
+  assert.ok(fs.existsSync(path.join(META_DIR, META)), 'a refusal touches nothing');
+  const r = removeCoin({ mint: 'testmint', wallet: 'walletA', ledgerStatus: 'done' });
+  assert.equal(r.files.length, 3);
+  assert.equal(one('SELECT status FROM launches WHERE mint = ?', 'testmint').status, 'removed');
+  assert.equal(one('SELECT COUNT(*) n FROM trades WHERE mint = ?', 'testmint').n, 0);
+  assert.ok(!fs.existsSync(path.join(LOGO_DIR, IMG)) && !fs.existsSync(path.join(META_DIR, META)));
+  await assert.rejects(coins.coin('testmint'), /No such coin/);
+  assert.deepEqual(removeCoin({ mint: 'testmint', wallet: 'walletA', ledgerStatus: 'done' }), { already: true });
+  row('official1', 'walletA', 'official', 'live');
+  assert.throws(() => removeCoin({ mint: 'official1', wallet: 'walletA', ledgerStatus: 'done' }), /official/);
+});

@@ -1,0 +1,413 @@
+/**
+ * Window launches: a Token-2022 coin with our transfer hook on a Meteora curve shaped like pump.fun's (the stack ported from
+ * IPO, hk/). The creator sets when buying opens (nobody, the creator included, can buy before: no block-zero devving) and
+ * when the window closes. At the close the graduator (api/graduator.mjs) fills what is left of the curve, takes 99% of the
+ * SOL back out through Meteora's migration fee, creates the pump.fun coin with the real raise and pushes every holder their
+ * share: the coin lands on pump.fun at whatever market cap the window ended at. If buyers fill the curve earlier, it
+ * graduates right then.
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { SystemProgram, Keypair, PublicKey } from '@solana/web3.js';
+import { getPriceFromSqrtPrice, getCurrentPoint, SwapMode } from '@meteora-ag/dynamic-bonding-curve-sdk';
+import BN from 'bn.js';
+import { env, num, ROOT } from './env.mjs';
+import { ApiError } from './errors.mjs';
+import * as sol from './sol.mjs';
+import { dbcClient, getPool, getConfig, priorityFee } from '../hk/lib/chain.mjs';
+import { buildLaunchTx, buildSwapTx, launchSize, buildListTxs } from '../hk/lib/launch.mjs';
+import { feeStepFor, sizeAt, DEFAULT_SIZE_FRACTION, creatorFeeOwed, MIN_TAX_PAYMENT } from '../hk/lib/curve.mjs';
+import { collectCreatorFee } from '../hk/lib/creator-fee.mjs';
+import { ed25519 } from '@noble/curves/ed25519.js';
+import bs58 from 'bs58';
+import { DEFAULT_RULES, validateRules, decodeRules, decodeList, hookPdas, hookErrorFromLogs, HOOK_ERRORS, LIST_MAX, LIST_OPEN_SECS } from '../hk/lib/rules.mjs';
+import { TRADE_GUARD_BPS, MAX_WALLET_BPS, offeredRules, creatorRules, publicRules } from './creator-rules.mjs';
+import { loadConfigState } from '../hk/lib/configs.mjs';
+import { loadLut } from '../hk/lib/lut.mjs';
+import { openDb, getLaunch as ledgerLaunch, registerLaunch } from '../hk/lib/db.mjs';
+import { LAUNCHED_STATUSES } from '../hk/lib/graduate.mjs';
+import { pumpMarketCap } from '../hk/lib/pumpprice.mjs';
+import { listPairs, lookupPair, MAX_CREATOR_FEE_BPS, USDC_ENTRY, USDC_MINT } from '../hk/lib/pairs.mjs';
+import { ensurePairConfig, pairCurveBucket, pairCurveParams } from '../hk/lib/configs.mjs';
+import { pumpParamsKey, pairStartSol } from '../hk/lib/curve.mjs';
+import { createRequire } from 'node:module';
+const { OnlinePumpSdk } = createRequire(import.meta.url)('@pump-fun/pump-sdk');
+import { recordIntent } from '../hk/lib/db.mjs';
+
+export const DATA_DIR = path.resolve(ROOT, env('DATA_DIR', 'data'));
+fs.mkdirSync(DATA_DIR, { recursive: true });
+const hookKeyFile = new URL('../hk/keys/hook-keypair.json', import.meta.url);
+export const HOOK_PROGRAM = new PublicKey(env('HOOK_PROGRAM', '') || (fs.existsSync(hookKeyFile) ? Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(hookKeyFile, 'utf8')))).publicKey : 'D7JBFRvengCEwz6d3xNVZzFCwrFwvwWa4DbF4DkQjPmV'));
+export const ledger = openDb(path.join(DATA_DIR, 'ledger.db'));
+export const dbc = dbcClient(sol.conn);
+
+/** The platform (hot) wallet: fills curves at their deadline, makes configs, launches the pump.fun coins. One key file. */
+export function platformKeypair() {
+  const file = env('PLATFORM_KEY', path.join(DATA_DIR, 'platform.json'));
+  if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify([...Keypair.generate().secretKey]), { mode: 0o600 });
+  return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(file, 'utf8'))));
+}
+export const PLATFORM = platformKeypair().publicKey;
+
+/**
+ * WINDOW_MODE: 'fill' (default, IPO's way) = the coin migrates to pump.fun when its curve FILLS at the cap the creator picked;
+ * buying never closes, nothing is fronted, the hot wallet only needs a fee float. 'deadline' = the creator also sets a time
+ * window; at its end the platform fills the rest of the curve (capital on the hot wallet) and the coin migrates at whatever cap.
+ */
+export const MODE = 'fill'; // IPO: a coin migrates when it fills at the creator's cap; the fronting mode is never on
+/** What the hot wallet keeps for fees in fill mode (configs + lookup table once, then transaction fees and migrations). */
+const FEE_FLOAT = 300_000_000n;
+/** The creator's first buy inside the launch transaction: ON only once the hook that allows it is live on this chain. */
+export const FIRST_BUY = env('WINDOW_FIRST_BUY', '1') === '1';
+/** The seconds the anti-snipe tax lasts: this site will not sell a buy into it. */
+export const TAX_SECS = 3;
+/** The creator's first buy may take at most this share of the total supply (operator, 25 Oct 2026). */
+export const FIRST_BUY_MAX_SUPPLY_PCT = 3;
+/**
+ * The most SOL a first buy may spend so it receives at most FIRST_BUY_MAX_SUPPLY_PCT of the supply, on the curve as it opens
+ * (pump.fun's shape: tokens(q) = vt − k/(vs + q)), with Meteora's 1% first-swap fee on top. Null until the configs exist.
+ */
+export async function firstBuyMaxLamports() {
+  const st = await configs().catch(() => null);
+  const p = st?.pump; if (!p) return null;
+  const target = (p.supply * FIRST_BUY_MAX_SUPPLY_PCT) / 100;
+  const q = (p.virtualSol * p.virtualTokens) / (p.virtualTokens - target) - p.virtualSol;
+  return BigInt(Math.floor((q / 0.99) * 1e9 * 0.999)); // a hair under, so rounding never lets it exceed the share
+}
+export const LIMITS = Object.freeze({ mode: MODE, firstBuy: FIRST_BUY, openSecsMin: 5, openSecsMax: 86_400, windowMinMinutes: num('WINDOW_MIN_MINUTES', 5), windowMaxMinutes: 30 * 24 * 60, maxWalletPctMax: 50 });
+/** The hot wallet must hold the curve's whole size (what it may have to front) before a launch of that size is offered. */
+const CAPITAL_MARGIN = 100_000_000n;
+
+// ⛔ "not there yet" is never cached: the moment the graduator writes configs.json / lut.json the next call sees them
+const configsShared = sol.shared(async () => loadConfigState(DATA_DIR), 20_000);
+const configs = async () => { const v = await configsShared(); if (!v) configsShared.forget(); return v; };
+/** The graduator's lookup table holds pump.fun's fixed accounts: the official launch's first buy fits with it. */
+export const graduationLut = () => loadLut(sol.conn, path.join(DATA_DIR, 'lut.json')).catch(() => null);
+const lutRaw = sol.shared(async () => loadLut(sol.conn, path.join(DATA_DIR, 'lut.json')).catch(() => null), 60_000);
+const lutShared = async () => { const v = await lutRaw(); if (!v) lutRaw.forget(); return v; };
+const platformBalance = sol.shared(async () => BigInt(await sol.conn.getBalance(PLATFORM, 'confirmed')), 20_000);
+const configOf = sol.sharedMap((addr) => getConfig(dbc, new PublicKey(addr)), 3_600_000);
+const poolOf = sol.sharedMap((addr) => getPool(dbc, new PublicKey(addr)), 10_000);
+/** The CHAIN's clock (what the hook decides on), not this machine's: a lagging clock would show the wrong phase. */
+const chainClock = sol.shared(async () => { const slot = await sol.conn.getSlot('confirmed'); const t = await sol.conn.getBlockTime(slot); return { t: t ?? Math.floor(Date.now() / 1000), at: Date.now() }; }, 5_000);
+export const chainNow = async () => { const c = await chainClock().catch(() => null); return c ? c.t + Math.floor((Date.now() - c.at) / 1000) : Math.floor(Date.now() / 1000); };
+
+/** The curve sizes a creator may pick right now: configs exist and the hot wallet can cover them. */
+export async function sizes() {
+  const st = await configs().catch(() => null);
+  if (!st) return [];
+  let bal = 0n;
+  try { bal = await platformBalance(); } catch {}
+  const covered = (s) => (MODE === 'deadline' ? bal >= BigInt(Math.round(s * 1e9)) + CAPITAL_MARGIN : bal >= FEE_FLOAT);
+  const recommended = st.pump ? sizeAt(st.pump, DEFAULT_SIZE_FRACTION) : null; // what the create form selects by default
+  return Object.keys(st.flatConfigs || {}).map(Number).sort((a, b) => a - b).map((s) => ({ sizeSol: s, capSol: st.pump ? st.pump.capAt(s) : null, startCapSol: st.pump ? st.pump.capAt(0) : null, available: covered(s), recommended: s === recommended }));
+}
+export async function ready() { const s = await sizes(); return s.some((x) => x.available) && Boolean(await lutShared()); }
+
+/** Validates the creator's window settings. */
+export function validateWindow(w) {
+  const openSecs = 0; // IPO: no opening delay, the anti-snipe tax does that job
+  // fill mode: no deadline at all (closeSecs 0): the coin trades on its curve until it fills, like IPO
+  const windowMinutes = MODE === 'deadline' ? Math.round(Number(w?.windowMinutes ?? 60)) : 0;
+  const sizeSol = Number(w?.sizeSol);
+  if (MODE === 'deadline') {
+    if (!(windowMinutes >= LIMITS.windowMinMinutes && windowMinutes <= LIMITS.windowMaxMinutes)) throw new ApiError(`The window is ${LIMITS.windowMinMinutes} minutes to 30 days`);
+    if (windowMinutes * 60 < openSecs + 60) throw new ApiError('The window must end at least a minute after buying opens');
+  }
+  if (!(sizeSol > 0)) throw new ApiError('Pick a curve size');
+  // the creator's hook rules (api/creator-rules.mjs): checked here, before anything is pinned or a key is taken
+  const rules = offeredRules(creatorRules(w?.rules));
+  return { openSecs, windowMinutes, sizeSol, maxWalletBps: MAX_WALLET_BPS, rules };
+}
+
+/** The launch transaction: Meteora pool + hook rules in one, signed by the mint. The creator (payer) signs in the browser. */
+export async function build({ launcher, name, symbol, uri, window: w, mint, devBuyLamports = 0n, pair = null, tickerFee = null, creatorFeeBps = pair?.creatorFeeBps ?? 0 }) {
+  { const max = await firstBuyMaxLamports(); if (devBuyLamports > 0n && (max == null || devBuyLamports > max)) throw new ApiError(`The first buy can take at most ${FIRST_BUY_MAX_SUPPLY_PCT}% of the supply: ${max ? (Number(max) / 1e9).toFixed(3) : '?'} SOL at most.`); }
+  const st = await configs();
+  if (!st?.flatConfigs?.[w.sizeSol]) throw new ApiError('That curve size is not available right now', 503);
+  const avail = (await sizes()).find((s) => s.sizeSol === w.sizeSol);
+  if (!avail?.available) throw new ApiError('That curve size is not available right now (the platform cannot cover it). Pick a smaller one.', 503);
+  const lut = await lutShared();
+  if (!lut) throw new ApiError('Launching is being set up (lookup table). Try again in a few minutes.', 503);
+  // holderRewards rides in the hook's rules (public, immutable): the graduation launches the pump.fun coin with it
+  // the creator's rules first, the window's own fixed rules over them: nothing a creator sends can touch these
+  const rules = { ...DEFAULT_RULES, ...(w.rules ?? {}), dev: new PublicKey(launcher), platformOn: true, platform: PLATFORM, openSecs: 0, closeSecs: 0, tradeGuardBps: TRADE_GUARD_BPS, maxWalletBps: MAX_WALLET_BPS, holderRewards: Boolean(w.holderRewards) };
+  const errs = validateRules(rules);
+  if (errs.length) throw new ApiError(errs.join(' '));
+  if (!feeStepFor(creatorFeeBps)) throw new ApiError('The creator fee is 0.01% to 3%.');
+  // a pair gets a curve shaped like its own on pump.fun; SOL the standing set
+  let config = null;
+  if (pair) {
+    const vSol = await pairVirtualSol(pair.mint);
+    if (w.sizeSol > pairCurveParams(pumpParamsKey(st.pump), vSol).completionSol) throw new ApiError('That market cap is not available on this pair. Pick a smaller one.');
+    config = await pairConfig({ vSol, sizeSol: w.sizeSol, creatorFeeBps, holders: true });
+  } else {
+    // every coin: the platform's claim holds the creator's share, then pays it out or buys holders more (Meteora only lets the creator's own wallet claim a creator share)
+    const addr = st.holderConfigs?.[w.sizeSol];
+    if (!addr) throw new ApiError('That curve size is not available right now', 503);
+    config = new PublicKey(addr);
+  }
+  const built = await buildLaunchTx({ dbc, hookProgram: HOOK_PROGRAM, config, creator: launcher, name, symbol, uri, rules, devBuyLamports, mint, lut, extraIxs: tickerFee ? [SystemProgram.transfer({ fromPubkey: new PublicKey(launcher), toPubkey: new PublicKey(tickerFee.to), lamports: tickerFee.lamports })] : [], priority: await priorityFee(sol.conn) });
+  if (launchSize(built.tx) > 1232) throw new ApiError(`This launch does not fit in one transaction (${launchSize(built.tx)} bytes): shorten the name`);
+  const { blockhash } = await sol.conn.getLatestBlockhash('confirmed');
+  built.tx.message.recentBlockhash = blockhash;
+  built.tx.sign([mint]);
+  return { tx: built.tx, pool: built.pool.toBase58(), config: config.toBase58(), rules };
+}
+
+export const ledgerHas = (mint) => Boolean(ledgerLaunch(ledger, mint));
+/** The token's rules as they are on chain (null until the launch landed). */
+export async function rulesOnChain(mint) {
+  const a = await sol.conn.getAccountInfo(hookPdas(HOOK_PROGRAM, mint).cfg, 'confirmed');
+  return a && a.owner.equals(HOOK_PROGRAM) ? decodeRules(a.data) : null;
+}
+export const onChain = async (mint) => Boolean(await rulesOnChain(mint));
+/** The creator-settable rules of a coin, numbers and words, read once: a config never changes after launch. */
+const holderRewardsOf = sol.sharedMap(async (mint) => { const r = await rulesOnChain(mint); if (!r) throw new Error('no rules yet'); return Boolean(r.holderRewards); }, 3_600_000);
+export const creatorFeeMessage = (mint, ts) => `ipo creator fee\nmint: ${mint}\ntime: ${ts}`;
+/** The creator's curve fee on the coin page. Null on holder rewards, and on the first test curves where Meteora holds the share. */
+async function creatorFeeOf(l, cfg, pool) {
+  if (!cfg || cfg.creatorTradingFeePercentage !== 0) return null;
+  if (await holderRewardsOf(l.mint).catch(() => true)) return null;
+  const paid = BigInt(l.creator_fee_paid ?? 0) + (l.tax_paid ? BigInt(l.tax_creator ?? 0) : 0n);
+  const step = feeStepFor(l.pair_cfee ?? 0);
+  const owed = pool && step ? creatorFeeOwed({ unclaimed: BigInt(pool.partnerQuoteFee.toString()), paid: BigInt(l.creator_fee_paid ?? 0), creatorPct: step.creatorPct }) : 0n;
+  return { owed: owed.toString(), paid: paid.toString(), min: MIN_TAX_PAYMENT.toString(), trading: l.status === 'trading', pending: Boolean(l.creator_claim_sig) };
+}
+/** The creator collects their curve fee. Signed by their wallet; the money only ever goes to the coin's creator. */
+export async function collectFee({ mint, wallet, ts, signature }) {
+  const l = ledgerLaunch(ledger, mint);
+  if (!l) throw new ApiError('No such coin here', 404);
+  const time = Number(ts);
+  if (!(Math.abs(Date.now() - time) < 5 * 60_000)) throw new ApiError('This request is stale: try again.');
+  let good = false;
+  try { good = ed25519.verify(bs58.decode(String(signature || '')), new TextEncoder().encode(creatorFeeMessage(mint, time)), new PublicKey(String(wallet)).toBytes()); } catch {}
+  if (!good) throw new ApiError('The signature does not match the wallet.', 401);
+  if (l.creator !== wallet) throw new ApiError('Only the creator can collect this.', 403);
+  const cfg = await configOf(l.config);
+  const step = feeStepFor(l.pair_cfee ?? 0);
+  if (cfg.creatorTradingFeePercentage !== 0 || !step || await holderRewardsOf(mint)) throw new ApiError('This coin has no fees to collect here.');
+  if (await platformBalance() < 5_000_000n) throw new ApiError('Collecting is paused for a moment. Try again soon.', 503);
+  try {
+    const { sig, lamports } = await collectCreatorFee({ conn: sol.conn, dbc, db: ledger, platform: platformKeypair(), mint, creatorPct: step.creatorPct, getPoolFresh: (addr) => getPool(dbc, new PublicKey(addr)) });
+    return { sig, lamports: lamports.toString() };
+  } catch (e) {
+    if (e.code) throw new ApiError(e.message, 409);
+    console.error('[creator-fee]', mint, e.message);
+    throw new ApiError('That did not go through. Try again in a minute.', 502);
+  }
+}
+const rulesPublic = sol.sharedMap(async (mint) => { const r = publicRules(await rulesOnChain(mint)); if (!r) throw new Error('no rules yet'); return r; }, 3_600_000);
+/** A listed coin's allow/blocklist: how many wallets, sealed or not, and whether the creator can still add (the first day). */
+const listStatus = sol.sharedMap(async (mint) => {
+  const [a, r] = await Promise.all([sol.conn.getAccountInfo(hookPdas(HOOK_PROGRAM, mint).list, 'confirmed'), rulesOnChain(mint)]);
+  const cur = a ? decodeList(a.data) : null;
+  const t = await chainNow();
+  return { count: cur?.count ?? 0, sealed: cur?.sealed ?? false, open: !(cur?.sealed) && Boolean(r) && t < r.launchTs + LIST_OPEN_SECS, closesAt: r ? r.launchTs + LIST_OPEN_SECS : null };
+}, 20_000);
+export const forgetList = (mint) => listStatus.forget?.(mint);
+
+/**
+ * The transactions that put `wallets` on the coin's allow/blocklist (24 per transaction, the creator signs each) and seal
+ * it with the last when `seal`. Wallets already listed are skipped; a wallet that sorts below the last listed one can
+ * never be added (the program only appends) and is reported in `tooLate`.
+ */
+export async function listTxs({ mint, creator, wallets, seal }) {
+  const m = sol.requireMint(mint).toBase58();
+  if (!sol.isAddress(creator)) throw new ApiError('Connect a wallet first.', 401);
+  const r = await rulesOnChain(m);
+  if (!r) throw new ApiError('This coin is not on chain yet.', 404);
+  if (r.dev.toBase58() !== creator) throw new ApiError('Only the coin\'s creator can change its list.', 403);
+  if (!r.allowlist && !r.blocklist) throw new ApiError('This coin has no list.');
+  const raw = Array.isArray(wallets) ? wallets : [];
+  if (raw.length > LIST_MAX) throw new ApiError(`A list holds at most ${LIST_MAX} wallets.`);
+  const keys = [];
+  for (const w of raw) { if (!sol.isKey(String(w).trim())) throw new ApiError(`Not a wallet address: ${String(w).slice(0, 60)}`); keys.push(new PublicKey(String(w).trim())); } // any valid key: a multisig vault (a PDA) may be listed too
+  const a = await sol.conn.getAccountInfo(hookPdas(HOOK_PROGRAM, m).list, 'confirmed');
+  const cur = a ? decodeList(a.data) : null;
+  if (cur?.sealed) throw new ApiError('The list is sealed.');
+  if (keys.length && (await chainNow()) >= r.launchTs + LIST_OPEN_SECS) throw new ApiError('The list can only grow in the first day after launch.');
+  const { txs, added, tooLate } = buildListTxs({ hookProgram: HOOK_PROGRAM, dev: creator, mint: new PublicKey(m), wallets: keys, already: cur?.wallets ?? [], seal: Boolean(seal) });
+  const { blockhash } = await sol.conn.getLatestBlockhash('confirmed');
+  return { added, tooLate: tooLate.map((w) => w.toBase58()), transactions: txs.map((tx) => { tx.recentBlockhash = blockhash; return tx.serialize({ requireAllSignatures: false }).toString('base64'); }) };
+}
+/** Relays a signed list transaction: only a transaction made of this hook's list instructions, paid by the creator. */
+export async function submitList({ mint, transaction }) {
+  const m = sol.requireMint(mint).toBase58();
+  const tx = sol.parseTx(transaction, 'The list transaction');
+  const msg = tx.message, keys = msg.staticAccountKeys;
+  const keyAt = (i) => keys[i] ?? null; // a lookup-table index has no static key: refused, never a crash
+  const ixs = msg.compiledInstructions.filter((ix) => !keyAt(ix.programIdIndex)?.equals(new PublicKey('ComputeBudget111111111111111111111111111111')));
+  const mintKey = new PublicKey(m);
+  const isListIx = (ix) => keyAt(ix.programIdIndex)?.equals(HOOK_PROGRAM) && ['hkLstAdd', 'hkLstSel'].includes(Buffer.from(ix.data).subarray(0, 8).toString())
+    && keyAt(ix.accountKeyIndexes[1])?.equals(mintKey); // account 1 of a list instruction is the mint: the relay only serves the coin it was asked about
+  if (!ixs.length || !ixs.every(isListIx)) throw new ApiError('Not a list transaction.', 400);
+  const r = await rulesOnChain(m);
+  if (!r || !keys[0].equals(r.dev)) throw new ApiError('Not signed by the coin\'s creator.', 403);
+  if (!sol.signedByPayer(tx)) throw new ApiError('Not signed by the wallet', 400);
+  const sig = await sol.sendSigned(tx, 'The list transaction');
+  forgetList(m);
+  return { sig };
+}
+
+/** Puts a landed launch in the graduator's ledger (idempotent), with its deadline read from the chain's launch time. */
+export async function register(row) {
+  const r = await rulesOnChain(row.mint);
+  if (!r) return false;
+  // the pool this row names, on the config it names: the wallet could have landed another transaction for the same address
+  const onPool = await getPool(dbc, new PublicKey(row.pool)).catch(() => null);
+  if (!onPool || onPool.config.toBase58() !== row.config) return false;
+  registerLaunch(ledger, { mint: row.mint, pool: row.pool, config: row.config, creator: row.launcher, name: row.name, symbol: row.symbol, uri: row.metadata_uri, gradSol: row.size_sol, closeAt: r.closeSecs ? r.launchTs + r.closeSecs : null, openSecs: r.openSecs, createdAt: r.launchTs });
+  return true;
+}
+
+/** For the analytics page. */
+export const ledgerStatus = (mint) => ledgerLaunch(ledger, mint)?.status ?? 'trading';
+export const creatorPaidOf = (mint) => ledgerLaunch(ledger, mint)?.creator_fee_paid ?? '0';
+export const pairFeeOf = (mint) => ledgerLaunch(ledger, mint)?.pair_cfee ?? 0;
+export const migratedMints = (n) => ledger.prepare("SELECT pump_mint AS m FROM launches WHERE pump_mint IS NOT NULL ORDER BY updated_at DESC LIMIT ?").all(n).map((r) => r.m);
+
+/** Where a window token stands, for the board and the coin page. */
+export async function summary(mint, { fresh = false } = {}) {
+  const l = ledgerLaunch(ledger, mint);
+  if (!l) return null;
+  const cfg = await configOf(l.config).catch(() => null);
+  const pool = l.status === 'trading' ? await poolOf(l.pool, { fresh }).catch(() => null) : null;
+  const threshold = cfg ? Number(cfg.migrationQuoteThreshold.toString()) / 1e9 : l.grad_sol;
+  const raisedSol = pool ? Number(pool.quoteReserve.toString()) / 1e9 : null;
+  const t = await chainNow();
+  const opensAt = l.created_at + Math.max(l.open_secs ?? 0, TAX_SECS), closesAt = l.close_at || null;
+  const launched = LAUNCHED_STATUSES.has(l.status) || (l.status === 'stalled' && LAUNCHED_STATUSES.has(l.stalled_from)) ? Boolean(l.pump_mint) : false;
+  const empty = l.status === 'done' && !l.pump_mint;
+  let phase = 'trading';
+  if (empty) phase = 'ended';
+  else if (l.status !== 'trading') phase = launched ? 'graduated' : 'graduating';
+  else if (t < opensAt) phase = 'opening';
+  else if (closesAt && t >= closesAt) phase = 'closing';
+  let priceSol = null, capSol = null, venue = 'window';
+  if (l.status === 'trading' && pool) { priceSol = Number(getPriceFromSqrtPrice(pool.sqrtPrice, 6, 9)); capSol = priceSol * 1e9; }
+  else if (l.pump_mint && launched) {
+    const pc = await pumpCapOf(`${l.pump_mint}:${['swapped', 'direct'].includes(l.pair_state) ? l.pair_mint : ''}`).catch(() => null);
+    capSol = pc?.marketCapSol ?? null; priceSol = capSol != null ? capSol / 1e9 : null; venue = pc?.venue ?? 'pump.fun';
+  }
+  const rules = await rulesPublic(l.mint).catch(() => null);
+  const list = rules?.allowlist || rules?.blocklist ? await listStatus(l.mint).catch(() => null) : null;
+  return {
+    kind: 'window', status: l.status, phase, venue, rules, list, pool: l.pool, opensAt, closesAt, chainNow: t, raisedSol, targetSol: threshold, progress: raisedSol != null && threshold ? Math.min(1, raisedSol / threshold) : (l.status === 'trading' ? 0 : 1),
+    priceSol, capSol, fronted: l.fronted != null ? Number(l.fronted) / 1e9 : null, raise: l.front_before != null ? Number(l.front_before) / 1e9 : null,
+    pumpMint: launched ? l.pump_mint : null, settled: l.settle_json ? JSON.parse(l.settle_json) : null, error: l.status === 'stalled' ? 'graduation needs attention' : null,
+    feesTo: l.fee_to ?? null,
+    creatorFee: await creatorFeeOf(l, cfg, pool).catch(() => null),
+    pair: l.pair_mint ? { mint: l.pair_mint, state: l.pair_state, creatorFeeBps: l.pair_cfee ?? 0 } : null,
+    // a window that ended with nobody holding anything: no pump.fun coin was made (nothing to migrate)
+    empty,
+  };
+}
+// "<pumpMint>:<pairMint or empty>": a coin paired with a custom pair holds the PAIR token in its curve/pool (its own decimals),
+// so its cap needs the pair's SOL price; read as SOL it was off by the pair's decimals (25 Oct 2026 review)
+const pumpCapOf = sol.sharedMap(async (key) => { const [m, pair] = key.split(':'); return pumpMarketCap(sol.conn, m, pair ? { quote: await pairQuote(pair) } : {}); }, 30_000);
+const pairQuote = sol.sharedMap(async (pair) => {
+  const [usd, solUsd, info] = await Promise.all([sol.quoteUsdOf(pair), sol.solUsd(), sol.conn.getAccountInfo(new PublicKey(pair), 'confirmed')]);
+  if (!(usd > 0) || !(solUsd > 0) || !info || info.data.length < 82) return null; // pumpMarketCap refuses a null quote: cap unknown, not wrong
+  return { mint: pair, solPerUnit: usd / solUsd, decimals: info.data[44] };
+}, 60_000);
+
+/** pump.fun's custom pairs a coin may migrate into (its quote-control list, deep liquidity only), shared for 10 minutes. */
+export const pairs = sol.shared(async () => [USDC_ENTRY, ...(await listPairs(sol.conn))], 600_000);
+/** A pasted CA, looked up once per 10 minutes per mint. */
+export const lookup = sol.sharedMap(async (mint) => {
+  const r = await lookupPair(sol.conn, mint);
+  if (r.transient) { const e = new Error(r.why); e.transient = true; throw e; } // a blip is answered but never cached for 10 minutes
+  if (r.ok && r.pair?.kind === 'pumpcoin') return { ok: false, why: "it is not on Pumpfun's custom-pair list" };
+  return r;
+}, 600_000, 500);
+export { MAX_CREATOR_FEE_BPS };
+
+/** A pair's starting reserves on pump.fun, in SOL at today's price: what its coin's curve here must start at. Never a stale price. */
+const pairV = new Map();
+async function pairVirtualSol(mint) {
+  const hit = pairV.get(mint);
+  if (hit && Date.now() - hit.at < 60_000) return hit.v;
+  const pump = new OnlinePumpSdk(sol.conn);
+  const units = mint === USDC_MINT ? (await pump.fetchGlobal()).initialVirtualQuoteReserves : (await pump.fetchQuoteControl())?.mints.find((e) => e.mint.toBase58() === mint)?.initialVirtualQuoteReserves;
+  if (units == null) throw new ApiError('Pumpfun does not list that pair', 400);
+  const WSOL = 'So11111111111111111111111111111111111111112', sig = () => AbortSignal.timeout(6000);
+  const [jup, dex, info] = await Promise.all([
+    fetch(`https://lite-api.jup.ag/price/v3?ids=${mint},${WSOL}`, { signal: sig() }).then((r) => r.json()).catch(() => null),
+    fetch(`https://api.dexscreener.com/tokens/v1/solana/${mint}`, { signal: sig() }).then((r) => r.json()).catch(() => null),
+    sol.conn.getAccountInfo(new PublicKey(mint), 'confirmed'),
+  ]);
+  const best = Array.isArray(dex) ? dex.filter((p) => p.baseToken?.address === mint && p.priceUsd).sort((x, y) => (y.liquidity?.usd ?? 0) - (x.liquidity?.usd ?? 0))[0] : null;
+  const r = pairStartSol({ units: units.toString(), decimals: info?.data?.[44], quoteUsd: Number(jup?.[mint]?.usdPrice), quoteUsd2: Number(best?.priceUsd), solUsd: Number(jup?.[WSOL]?.usdPrice) });
+  if (!r.vSol) { console.log(`[pair] ${mint}: ${r.why}`); throw new ApiError('That pair cannot be priced safely right now. Try again in a moment.', 503); }
+  pairV.set(mint, { v: r.vSol, at: Date.now() });
+  return r.vSol;
+}
+/** The market caps a coin on this pair would migrate at, for the create form. */
+export async function pairCurve(mint) {
+  const st = await configs(); if (!st?.pump) throw new ApiError('Launching is being set up. Try again in a few minutes.', 503);
+  const vSol = await pairVirtualSol(mint);
+  const p = pairCurveParams(pumpParamsKey(st.pump), vSol);
+  return { virtualSol: pairCurveBucket(vSol), startCapSol: p.capAt(0), caps: Object.fromEntries(Object.keys(st.flatConfigs || {}).filter((s) => Number(s) <= p.completionSol).map((s) => [s, p.capAt(Number(s))])) };
+}
+/** The hot wallet pays for a new pair config before the launcher signs: a floor and a daily cap bound what unsigned requests can spend. */
+const PAIR_CONFIG_FLOOR = FEE_FLOAT + 50_000_000n, PAIR_CONFIGS_PER_DAY = 25;
+let pairConfigsBeingMade = 0; // counted before the first await, so requests at once cannot all pass the daily cap
+const pairConfigs = new Map(); // one creation per config at a time: two launches at once must not pay twice
+const pairConfig = (args) => {
+  const key = [pairCurveBucket(args.vSol), args.sizeSol, args.creatorFeeBps, Boolean(args.holders)].join('|');
+  if (pairConfigs.has(key)) return pairConfigs.get(key);
+  let held = false;
+  const guard = async (made) => {
+    if (made.filter((e) => e.at > Date.now() - 86_400_000).length + pairConfigsBeingMade >= PAIR_CONFIGS_PER_DAY) throw new ApiError('This pair is not available right now. Try again tomorrow or pick another pair.', 503);
+    pairConfigsBeingMade++; held = true;
+    if (BigInt(await sol.conn.getBalance(PLATFORM, 'confirmed')) < PAIR_CONFIG_FLOOR) throw new ApiError('Custom pairs are not available right now. Try again later.', 503);
+  };
+  pairConfigs.set(key, ensurePairConfig({ conn: sol.conn, platform: platformKeypair(), hookProgram: HOOK_PROGRAM, dataDir: DATA_DIR, log: console.log, guard, ...args }).finally(() => { if (held) pairConfigsBeingMade--; pairConfigs.delete(key); }));
+  return pairConfigs.get(key);
+};
+/** Validates a creator's pair choice: null (SOL) or { mint, symbol, creatorFeeBps }. */
+export async function validatePair(mint, creatorFeeBps) {
+  if (!mint) { if (creatorFeeBps) throw new ApiError('A Pumpfun creator fee needs a custom pair (Pumpfun ignores it on SOL).'); return null; }
+  let p = (await pairs().catch(() => [])).find((x) => x.mint === String(mint));
+  if (!p) { const r = await lookup(String(mint)).catch(() => null); if (!r?.ok) throw new ApiError(r?.why ? `That pair cannot be used: ${r.why}.` : 'That pair cannot be checked right now. Try again.'); p = r.pair; }
+  if (p.kind === 'pumpcoin') throw new ApiError("Pick a token from Pumpfun's custom-pair list.");
+  const fee = creatorFeeBps == null || creatorFeeBps === '' ? 0 : Number(creatorFeeBps);
+  if (!feeStepFor(fee)) throw new ApiError('The creator fee is 0.01% to 3%.');
+  if (p.kind === 'usdc' && fee) throw new ApiError('Pumpfun does not allow a custom creator fee on USDC.');
+  // USDC is one of pump.fun's built-in quotes: its creator fee follows pump.fun's schedule and cannot be set
+  return { mint: p.mint, symbol: p.symbol, kind: p.kind ?? 'control', creatorFeeBps: p.kind === 'usdc' ? 0 : fee };
+}
+/** Records the pair the graduator migrates this coin into (the ledger's launch_intents; overwritten on a re-prepare). */
+export function recordPair(mint, pair) {
+  if (pair) recordIntent(ledger, mint, pair.mint, pair.creatorFeeBps);
+  else ledger.prepare('DELETE FROM launch_intents WHERE mint = ?').run(mint);
+}
+
+/** A buy (lamports in) or sell (units in) on the window token's curve, quoted from the live curve with slippage. */
+export async function swap({ wallet, mint, side, amountIn, slippageBps }) {
+  const l = ledgerLaunch(ledger, mint);
+  if (!l) throw new ApiError('Not a window token', 404);
+  if (l.status !== 'trading') throw new ApiError('This coin is graduating to pump.fun. It can be traded there in a few minutes.', 409);
+  const r = await rulesOnChain(mint);
+  const t = await chainNow();
+  const buy = side === 'buy';
+  if (r && t < r.launchTs + TAX_SECS) throw new ApiError(`The anti-snipe tax is on for ${r.launchTs + TAX_SECS - t} more second(s). This site will not trade into it: try again then.`, 409);
+  if (buy && r && r.closeSecs && t >= r.launchTs + r.closeSecs) throw new ApiError('The window has closed: this coin is graduating to pump.fun.', 409);
+  const [poolState, cfg] = await Promise.all([getPool(dbc, new PublicKey(l.pool)), configOf(l.config)]);
+  if (!poolState) throw new ApiError('Could not read the curve. Try again.', 503);
+  let minOut;
+  try {
+    const q = dbc.pool.swapQuote2({ virtualPool: { poolState }, config: cfg, swapBaseForQuote: !buy, hasReferral: false, eligibleForFirstSwapWithMinFee: false,
+      currentPoint: await getCurrentPoint(sol.conn, cfg.activationType), slippageBps, swapMode: buy ? SwapMode.PartialFill : SwapMode.ExactIn, amountIn: new BN(amountIn.toString()) });
+    minOut = BigInt(q.minimumAmountOut.toString());
+    var expected = BigInt(q.amountOut?.toString?.() ?? q.minimumAmountOut.toString());
+  } catch (e) { throw new ApiError(`Cannot quote that trade: ${String(e.message).slice(0, 120)}`, 400); }
+  const tx = await buildSwapTx({ dbc, pool: l.pool, owner: wallet, buy, amountIn, minimumAmountOut: minOut, priority: await priorityFee(sol.conn) });
+  tx.recentBlockhash = (await sol.conn.getLatestBlockhash('confirmed')).blockhash;
+  return { tx, expected, minOut };
+}
+
+/** A hook refusal in failed-transaction logs, in words. */
+export const hookReason = (logs) => { const c = hookErrorFromLogs(logs, HOOK_PROGRAM); return c ? HOOK_ERRORS[c] ?? `hook refused (${c})` : null; };
+export const hookCode = (logs) => hookErrorFromLogs(logs, HOOK_PROGRAM);
