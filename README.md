@@ -3,7 +3,7 @@
 <h1 align="center">IPO: Initial Pump Offering</h1>
 
 <p align="center">
-  A Solana launchpad. Coins start on a rule-enforcing curve shaped like Pumpfun's, then migrate to Pumpfun with holders paid automatically.
+Coins start on a rule-enforcing curve shaped like Pumpfun's, then migrate to Pumpfun with holders paid automatically.
 </p>
 
 <p align="center">
