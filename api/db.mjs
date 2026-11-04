@@ -82,7 +82,7 @@ addColumn('launches', 'size_sol', 'REAL');
 addColumn('launches', 'open_secs', 'INTEGER');
 addColumn('launches', 'window_minutes', 'INTEGER');
 addColumn('launches', 'holder_rewards', 'INTEGER NOT NULL DEFAULT 0');
-// King of the hill: when the coin's market cap first crossed the bar (unix ms); the latest crowned coin still on its curve is king
+// unused since king of the hill was removed (4 Nov); the column stays in existing databases
 addColumn('launches', 'crowned_at', 'INTEGER');
 // origin 'site' (launched here) | 'external' (a pump.fun coin listed by the operator, scripts/list-coin.mjs)
 addColumn('launches', 'origin', "TEXT NOT NULL DEFAULT 'site'");

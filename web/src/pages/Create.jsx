@@ -15,11 +15,15 @@ export default function Create({ cfg }) {
   const w = useWallet();
   // the gate: open for everyone, or for this wallet alone (the operator's test launch while launching is closed)
   const [allowed, setAllowed] = useState(false);
+  const fillOfficial = ({ name, symbol, twitter, website, image }) => { // only what is still empty: anything typed stays
+    setForm((f) => ({ ...f, name: f.name || name, symbol: f.symbol || symbol, twitter: f.twitter || twitter, website: f.website || website }));
+    fetch(image).then((r) => r.blob()).then(readFile).then((d) => setImageData((cur) => cur || d)).catch(() => {});
+  };
   const [official, setOfficial] = useState(false); // $IPO: a normal SOL pair on Pumpfun, for the official wallet alone
   useEffect(() => {
     if (cfg.launchOpen !== false || !w.address) { setAllowed(false); setOfficial(false); return; }
     let alive = true;
-    api.configFor(w.address).then((c) => { if (alive) { setAllowed(c.launchOpen === true); setOfficial(c.officialLaunch === true); } }).catch(() => {});
+    api.configFor(w.address).then((c) => { if (alive) { setAllowed(c.launchOpen === true); setOfficial(c.officialLaunch === true); if (c.officialPreset) fillOfficial(c.officialPreset); } }).catch(() => {});
     return () => { alive = false; };
   }, [cfg.launchOpen, w.address]);
   const open = cfg.launchOpen !== false || allowed;
@@ -196,7 +200,7 @@ export default function Create({ cfg }) {
           {windows?.rules && (
             <div className="panel lsec">
               <div className="lsec-title"><span className="num">3</span><h2>Rules</h2><span className="muted sm">(optional)</span></div>
-              <p className="sec-lede">rules the coin keeps while it is on its curve, until it migrates to pump.fun. the hook on chain enforces them on every trade and send; written at launch, never changed.</p>
+              <p className="sec-lede">rules the coin keeps while it is on its curve, until it migrates to Pumpfun. the hook on chain enforces them on every trade and send; written at launch, never changed.</p>
               <RulesPicker form={rf} setForm={setRf} disabled={Boolean(step)} />
             </div>
           )}
@@ -225,7 +229,6 @@ export default function Create({ cfg }) {
             {windows && <div className="ptok-foot"><span>{sizeNow ? `${capText(sizeNow)} market cap` : ''}</span><span>then pump.fun</span></div>}
           </div>
           <div className="panel golaunch">
-            <p className="muted sm" style={{ margin: 0, textAlign: 'center' }}>tip: coin data cannot be changed after creation</p>
             {error && !modal && <div className="err">{error}</div>}
             <button className="btn wide big" disabled={!ready || !cfg.launchReady || !open || (cfg.windowOnly && !windows && !official)} onClick={() => { setError(null); setModal(true); }}>create coin</button>
             {!cfg.launchReady && <div className="err">Launching is not set up on this server yet.</div>}
@@ -240,7 +243,7 @@ export default function Create({ cfg }) {
           <div className="sm" style={{ display: 'grid', gap: 6 }}>
             <div><span className="muted">anti-snipe tax:</span> 99% falling to the normal fee over the first 3 seconds. your first buy skips it</div>
             {windows.limits?.mode === 'deadline' && <div><span className="muted">window ends:</span> {windowMinutes >= 1440 ? `${windowMinutes / 1440} day(s)` : windowMinutes >= 60 ? `${windowMinutes / 60} hour(s)` : `${windowMinutes} minutes`} after launch</div>}
-            <div><span className="muted">migrates to pump.fun at:</span> {(() => { const x = sizes.find((y) => y.sizeSol === size); return (x && capOf(x)) ? `${Math.round(capOf(x))} SOL market cap${cfg.solUsd ? ` (~$${(capOf(x) * cfg.solUsd / 1000).toFixed(1)}k)` : ''}` : `${size} SOL`; })()}</div>
+            <div><span className="muted">migrates to Pumpfun at:</span> {(() => { const x = sizes.find((y) => y.sizeSol === size); return (x && capOf(x)) ? `${Math.round(capOf(x))} SOL market cap${cfg.solUsd ? ` (~$${(capOf(x) * cfg.solUsd / 1000).toFixed(1)}k)` : ''}` : `${size} SOL`; })()}</div>
             <div><span className="muted">pair:</span> {pair ? `${pair.symbol}${pairFee && pair.kind !== 'usdc' ? `, ${pairFee / 100}% Pumpfun creator fee` : ''}` : 'SOL'}</div>
             <div><span className="muted">creator rewards:</span> {rewards === 'holders' ? 'Holders' : 'Creator'}</div>
             <div><span className="muted">max per wallet:</span> {maxWalletPct ? `${maxWalletPct}% of supply` : 'off'}</div>
@@ -258,7 +261,7 @@ export default function Create({ cfg }) {
           <p className="muted xs">cost to deploy: ~{windows.deployCostSol} SOL{tickerFee > 0 ? ` + ${tickerFee} SOL ticker fee` : ''}{windows.limits?.firstBuy && Number(devBuy) > 0 ? ` + ${Number(devBuy)} SOL for your first buy` : ''}</p>
         </Modal>
       )}
-      {modal && !windows && (
+      {modal && official && (
         <Modal onClose={() => { if (!step) setModal(false); }}>
           <h2>choose how many [{form.symbol.trim().toUpperCase() || 'coins'}] you want to buy (optional)</h2>
           <p className="muted sm">tip: it's optional but buying a small amount of coins helps protect your coin from snipers</p>

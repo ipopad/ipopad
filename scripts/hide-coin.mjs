@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Hides a coin from this site (a test launch, say): off the board, the ticker, the king and the ticker's trades. Its page
+ * Hides a coin from this site (a test launch, say): off the board, the ticker and the ticker's trades. Its page
  * still answers a direct link so anyone who bought while it was listed can still sell here; the token itself stays on chain.
  *   node scripts/hide-coin.mjs <mint>          hide      |     node scripts/hide-coin.mjs <mint> --show     list it again
  */

@@ -72,7 +72,7 @@ check('create recorded as a trade', one("SELECT 1 FROM trades WHERE mint = ? AND
 
 /* ── 3. board ── */
 let board = await coins.list({});
-check('board lists the coin as king', board.coins.length === 1 && board.king?.mint === MINT && board.coins[0].capSol > 0, `cap ${board.coins[0]?.capSol?.toFixed(2)} SOL`);
+check('board lists the coin', board.coins.length === 1 && board.coins[0].capSol > 0, `cap ${board.coins[0]?.capSol?.toFixed(2)} SOL`);
 check('search finds it by ticker, misses others', (await coins.list({ q: 'e2elong' })).coins.length === 1 && (await coins.list({ q: 'nope' })).coins.length === 0);
 const page = await coins.coin(MINT);
 check('coin page: holders with the curve labelled and the dev', page.holders.some((h) => h.label === 'bonding curve') && page.holders.some((h) => h.owner === w(L)), `${page.holders.length} holders`);
@@ -118,21 +118,6 @@ check('a price sample was taken', one('SELECT COUNT(*) AS n FROM prices WHERE mi
 }
 check('ticker shows the events, newest first', (() => { const tk = coins.ticker(); return tk.length === 4 && tk[0].side === 'sell' && tk[3].side === 'create'; })());
 
-/* ── 5. replies ── */
-const msg = (tsx, text) => coins.replyMessage(MINT, tsx, text);
-const sig = (kp, m) => bs58.encode(ed25519.sign(new TextEncoder().encode(m), kp.secretKey.slice(0, 32)));
-const t1 = now();
-const rs = await step('reply posted with a valid signature', async () => coins.postReply({ mint: MINT, wallet: w(B1), text: 'gm', ts: t1, signature: sig(B1, msg(t1, 'gm')) }));
-check('reply stored', rs?.length === 1 && rs[0].text === 'gm');
-check('a reply signed by another key is refused', (() => { try { coins.postReply({ mint: MINT, wallet: w(B1), text: 'hi', ts: t1, signature: sig(B2, msg(t1, 'hi')) }); return false; } catch (e) { return /signature/.test(e.message); } })());
-check('a stale reply is refused', (() => { const old = now() - 10 * 60_000; try { coins.postReply({ mint: MINT, wallet: w(B1), text: 'hi', ts: old, signature: sig(B1, msg(old, 'hi')) }); return false; } catch (e) { return /stale/.test(e.message); } })());
-check('a reply with the text changed after signing is refused', (() => { const tsx = now(); try { coins.postReply({ mint: MINT, wallet: w(B1), text: 'changed', ts: tsx, signature: sig(B1, msg(tsx, 'original')) }); return false; } catch (e) { return /signature/.test(e.message); } })());
-check('a captured reply cannot be re-posted', (() => { try { coins.postReply({ mint: MINT, wallet: w(B1), text: 'gm', ts: t1, signature: sig(B1, msg(t1, 'gm')) }); return false; } catch (e) { return /already posted/.test(e.message); } })());
-const uni = 'wait\u2026 \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67 \uff21 fine';
-const t2 = now() + 1;
-const ru = await step('a reply with an ellipsis, a ZWJ emoji and fullwidth text is accepted', async () => coins.postReply({ mint: MINT, wallet: w(B1), text: uni, ts: t2, signature: sig(B1, msg(t2, uni)) }));
-check('unicode reply stored cleaned (NFKC, no joiners)', ru?.length === 2 && ru[1].text === 'wait... \ud83d\udc68\ud83d\udc69\ud83d\udc67 A fine', JSON.stringify(ru?.[1]?.text));
-check('board counts the replies', (await coins.list({})).coins[0].replies === 2);
 check('search finds a coin by its full mint address', (await coins.list({ q: MINT })).coins.length === 1);
 
 /* ── 6. a second launch, no first buy, by another wallet; limits; reconcile ── */
@@ -142,7 +127,7 @@ check('second coin live', s2?.status === 'live');
 check('holder rewards: the curve creator is the holder-rewards PDA', (await pump.coinState(conn, p2.mint))?.creator === pump.holderRewardsAddress(new PublicKey(p2.mint)).toBase58());
 check('metadata URI is hosted by the site', one('SELECT metadata_uri AS u FROM launches WHERE mint = ?', p2.mint).u.startsWith('http://127.0.0.1:5480/meta/'));
 board = await coins.list({ sort: 'cap' });
-check('board: 2 coins, the traded one is king, cap sort', board.coins.length === 2 && board.king.mint === MINT && board.coins[0].mint === MINT);
+check('board: 2 coins, cap sort', board.coins.length === 2 && board.coins[0].mint === MINT);
 check('bump order puts the newest activity first', (await coins.list({ sort: 'bump' })).coins[0].mint === p2.mint);
 run("UPDATE launches SET status = 'created', updated_at = ? WHERE mint = ?", now() - 60_000, p2.mint);
 check('reconcile heals a row left created', (await launch.reconcile()) === 1 && one('SELECT status FROM launches WHERE mint = ?', p2.mint).status === 'live');

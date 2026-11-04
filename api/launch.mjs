@@ -56,6 +56,8 @@ export const launchAllowed = (wallet) => Boolean(wallet) && (getKv('launchAllow'
  * with an `ipo` address from the pool. Once. Its landing lists it as the official coin and opens launching for everyone (markLive).
  */
 export const officialAllowed = (wallet) => Boolean(wallet) && wallet === env('OFFICIAL_WALLET', '') && !getKv('officialLive', null);
+/** What the official wallet's form starts with (operator, 4 Nov): still editable there. */
+export const OFFICIAL_PRESET = { name: 'Initial Pump Offering', symbol: 'IPO', twitter: 'https://x.com/LaunchOnIPO', website: 'https://ipopad.app/', image: '/ipo-token.png' };
 export const prepareMessage = (wallet, ts) => `ipo launch\nwallet: ${wallet}\ntime: ${ts}`;
 /** The launch lookup table (scripts/make-lut.mjs; kv launchLut or LOOKUP_TABLE). Without one a launch cannot carry a first buy. */
 const lutShared = sol.shared(async () => { const a = env('LOOKUP_TABLE', '') || getKv('launchLut', null); return a ? loadLookupTable(sol.conn, a) : window.graduationLut(); }, 600_000);
@@ -265,7 +267,7 @@ export async function prepare(body, ip = null) {
   if (!official && !launchOpen() && !launchAllowed(launcher)) throw new ApiError('Launching opens soon. Check back in a little while.', 503);
   if (body.window && !(await window.ready())) throw new ApiError('Window launches are being set up on this server. Try again in a few minutes.', 503);
   // WINDOW_ONLY=1 (IPO): every coin launched here is a window launch; a plain pump.fun launch is never offered
-  if (!body.window && WINDOW_ONLY && !official) throw new ApiError('Launching opens soon. Check back in a little while.', 503);
+  if (!body.window && WINDOW_ONLY && !official) throw new ApiError('This launch is not available.', 403);
   if (!sol.isAddress(launcher)) throw new ApiError('Connect a wallet first.', 401);
   // the wallet asks for this launch itself: a key, a pin or a pair config is never spent, and a launch never replaced, on an address someone only named
   const ts = Number(body.ts);
@@ -434,9 +436,9 @@ export async function submit({ mint, transaction }) {
     }
     run("UPDATE launches SET status = 'created', sig = ?, updated_at = ? WHERE mint = ? AND status <> 'live'", sig, now(), mint);
     if (await onChain(mint).catch(() => false)) markLive(row, sig);
-    else {
-      await sol.sleep(1500);
-      if (await onChain(mint).catch(() => false)) markLive(row, sig);
+    else for (let i = 0; i < 8; i++) { // a lagging RPC node: reconcile would only catch it 30 to 60 s later
+      await sol.sleep(1000);
+      if (await onChain(mint).catch(() => false)) { markLive(row, sig); break; }
     }
     const st = one('SELECT status FROM launches WHERE mint = ?', mint).status;
     if (row.kind === 'window' && st === 'live') await registerWindow(row);

@@ -3,7 +3,9 @@ import { Link } from '../lib/router.js';
 import { api } from '../lib/api.js';
 import { useWallet, cancelled } from '../lib/wallet.jsx';
 import Chart from '../components/Chart.jsx';
-import { Modal, Spinner } from '../components/Chrome.jsx';
+import { pairOf, PairTag } from '../components/CoinCard.jsx';
+import { Modal, Spinner, XIcon } from '../components/Chrome.jsx';
+import { Icon } from '../components/Icons.jsx';
 import { usdK, ago, short, shortName, colorOf, lamportsToSol, tokens, pumpLink } from '../lib/format.js';
 import { RulesLines } from '../components/Rules.jsx';
 import { parseWallets } from '../lib/rulesText.js';
@@ -18,31 +20,23 @@ function WindowPanel({ c }) {
   const w = c.window, t = useNow(w.chainNow ? w.chainNow - Date.now() / 1000 : 0); // the chain's clock, which the hook decides on
   const phaseText = w.phase === 'ended' ? 'the window ended with no holders: nothing migrated'
     : w.phase === 'opening' ? `anti-snipe tax is on: normal fees in ${fmtLeft(w.opensAt - t)}`
-    : w.phase === 'trading' ? (w.closesAt ? `window ends in ${fmtLeft(w.closesAt - t)}` : `on its curve: migrates to pump.fun when it fills`)
-    : w.phase === 'closing' ? 'window closed: migrating to pump.fun now'
-    : w.phase === 'graduating' ? `migrating to pump.fun (${w.status})`
-    : 'On Pumpfun';
+    : w.phase === 'trading' ? (w.closesAt ? `window ends in ${fmtLeft(w.closesAt - t)}` : null)
+    : w.phase === 'closing' ? 'window closed: migrating to Pumpfun now'
+    : `migrating to Pumpfun (${w.status})`;
+  if (w.phase === 'graduated') return null; // the coin card holds the new address
   const pct = Math.round((w.progress ?? 0) * 100);
   return (
     <div className="panel sm">
-      <div className="b yellow">{phaseText}</div>
-      {w.phase === 'graduated' && w.pumpMint && <div>Pumpfun coin: <a className="green" href={pumpLink(w.pumpMint)} target="_blank" rel="noreferrer">{short(w.pumpMint, 6)}</a>{w.settled ? ` · ${w.settled.holders} holders received their coins` : ''}</div>}
+      {phaseText && <div className="b yellow">{phaseText}</div>}
       {w.phase !== 'graduated' && w.phase !== 'ended' && <>
-        <div>curve progress: {pct}%</div>
+        <div style={{ textAlign: 'center' }}>curve progress: {pct}%</div>
         <div className="bar"><i style={{ width: `${pct}%` }} /></div>
-        <p className="muted xs" style={{ margin: 0 }}>
-          {w.raisedSol != null ? `${w.raisedSol.toFixed(3)} SOL in the curve of ${w.targetSol?.toFixed(1)} SOL. ` : ''}
-          {w.closesAt ? 'when the window ends the coin migrates to pump.fun at whatever market cap it has reached; every holder receives the pump.fun coin automatically. if the curve fills first it migrates right away.' : `when the curve fills (${w.targetSol?.toFixed(1)} SOL raised) the coin migrates to pump.fun and every holder receives the pump.fun coin automatically.`}
-          {' '}buys in the first 3 seconds paid the anti-snipe tax. no wallet can hold more than 3% of supply on the curve.{w.rules?.bundleMax ? ' only one buy lands per block.' : ''}
-        </p>
       </>}
-      {w.phase === 'graduated' && w.raise != null && <p className="muted xs" style={{ margin: 0 }}>the window raised {w.raise.toFixed(3)} SOL; the coin opened on pump.fun at that market cap.</p>}
-      {w.phase === 'graduated' && w.raise == null && <p className="muted xs" style={{ margin: 0 }}>the curve filled and the coin moved to Pumpfun at a new address. The Pumpfun coin is the real one now; the old curve token is finished. Holders usually receive about 97% to 99% of the amount they held, less on small curves with many holders. On a custom pair the amount also moved with the pair's price against SOL.</p>}
-      {w.pair && w.phase !== 'graduated' && <div className="muted xs">migrates into a Pumpfun coin paired with a custom pair{w.pair.creatorFeeBps ? `, ${w.pair.creatorFeeBps / 100}% creator fee` : ''}.</div>}
+      {w.pair && w.phase !== 'graduated' && <div className="muted xs">migrates into a Pumpfun coin paired with {w.pair.symbol ?? 'a custom pair'}{w.pair.creatorFeeBps ? `, ${w.pair.creatorFeeBps / 100}% creator fee` : ''}.</div>}
       {w.pair?.state === 'fallback' && <div className="muted xs">the custom pair could not be used at migration, so the coin migrated against SOL.</div>}
       {c.holderRewards && <div className="muted xs">creator rewards go to the holders (pump.fun holder rewards).</div>}
       {w.rules?.any && w.phase !== 'graduated' && w.phase !== 'ended' && <div className="xs" style={{ display: 'grid', gap: 4 }}>
-        <div className="muted">rules on its curve, enforced by the hook on every trade and send until it migrates to pump.fun:</div>
+        <div className="muted">rules on its curve, enforced by the hook on every trade and send until it migrates to Pumpfun:</div>
         <RulesLines lines={w.rules.lines} className="xs" />
       </div>}
       {w.list && w.phase !== 'graduated' && w.phase !== 'ended' && <div className="muted xs">{w.rules?.allowlist ? 'allowlist' : 'blocklist'}: {w.list.count} wallet{w.list.count === 1 ? '' : 's'}{w.list.sealed ? ', sealed' : w.list.open ? ', the creator can still add wallets for a day after launch' : ', closed'}.</div>}
@@ -82,13 +76,10 @@ function ListPanel({ c, onDone }) {
   );
 }
 
-const GRADUATION_CAP_SOL = 411; // market cap when a SOL-paired pump.fun curve completes: 115 virtual SOL over 279.9M tokens, 1B supply
-const KOTH_USD = 30_000;
 
 export default function Coin({ mint, cfg }) {
   const [c, setC] = useState(null);
   const [error, setError] = useState(null);
-  const [tab, setTab] = useState('thread');
   const [chart, setChart] = useState(null);
   const [interval, setIntervalSecs] = useState(300);
   const load = useCallback(() => {
@@ -113,10 +104,6 @@ export default function Coin({ mint, cfg }) {
   if (error) return <main className="wrap"><div className="narrow"><Link href="/" className="bracket back">[go back]</Link><div className="err">{error}</div></div></main>;
   if (!c) return <main className="wrap"><div className="empty" style={{ marginTop: 40 }}>loading…</div></main>;
   const curveProgress = Math.round((c.progress ?? 0) * 100);
-  // the bar to beat: the current king's cap, or the crown's threshold when nobody is crowned yet
-  const kothBar = Math.max(c.kothUsd ?? KOTH_USD, c.king && c.king.mint !== c.mint ? c.king.capUsd ?? 0 : 0);
-  const isKing = Boolean(c.king && c.king.mint === c.mint);
-  const koth = isKing ? 100 : Math.min(100, Math.round(((c.capUsd ?? 0) / kothBar) * 100));
   return (
     <main className="wrap">
       <Link href="/" className="bracket back">[go back]</Link>
@@ -128,7 +115,7 @@ export default function Coin({ mint, cfg }) {
         <div className="facts">
         <span className="muted">created by <i className="avatar" style={{ background: colorOf(c.creator) }} /> <span className="blue">{shortName(c.creator)}</span></span>
         <span className="green b">market cap: {usdK(c.capUsd)}</span>
-        <span className="muted">replies: {c.replyCount}</span>
+        {pairOf(c) && <PairTag pair={pairOf(c)} />}
         {c.kind !== 'window' && c.holderRewards && <span className="yellow sm">creator rewards to holders</span>}
         {c.kind === 'window' ? (c.window?.pumpMint && <a className="bracket sm" href={pumpLink(c.window.pumpMint)} target="_blank" rel="noreferrer">[view on pump.fun]</a>) : <a className="bracket sm" href={pumpLink(c.mint)} target="_blank" rel="noreferrer">[view on pump.fun]</a>}
         </div>
@@ -137,47 +124,19 @@ export default function Coin({ mint, cfg }) {
       <div className="cols">
         <section>
           <Chart mint={mint} data={chart} solUsd={c.solUsd} interval={interval} setInterval={setIntervalSecs} />
-          <div className="tabs">
-            <button className={`bracket${tab === 'thread' ? ' green' : ''}`} onClick={() => setTab('thread')}>[thread]</button>
-            <button className={`bracket${tab === 'trades' ? ' green' : ''}`} onClick={() => setTab('trades')}>[trades]</button>
-          </div>
-          {tab === 'thread' ? <Thread c={c} onPosted={(replies) => setC({ ...c, replies, replyCount: replies.length })} /> : <Trades c={c} chart={chart} />}
+          <div className="coin-trades"><Trades c={c} chart={chart} /></div>
         </section>
         <aside className="side">
           {c.kind === 'window' && c.window && <WindowPanel c={c} />}
           {c.kind === 'window' && c.window?.list?.open && <ListPanel c={c} onDone={load} />}
           <TradePanel c={c} cfg={cfg} onTraded={load} />
           {c.window?.creatorFee && <CreatorFees c={c} onDone={load} />}
-          <div className="panel">
-            <div className="info">
-              <img src={c.image} alt="" />
-              <div className="sm">
-                <div className="b">{c.name} ({c.symbol})</div>
-                <div className="muted" style={{ wordBreak: 'break-word' }}>{c.description}</div>
-                <div className="wrapgap" style={{ marginTop: 6 }}>
-                  {c.socials?.twitter && <a className="bracket xs" href={c.socials.twitter} target="_blank" rel="noreferrer">[twitter]</a>}
-                  {c.socials?.telegram && <a className="bracket xs" href={c.socials.telegram} target="_blank" rel="noreferrer">[telegram]</a>}
-                  {c.socials?.website && <a className="bracket xs" href={c.socials.website} target="_blank" rel="noreferrer">[website]</a>}
-                </div>
-              </div>
-            </div>
-            <div className="xs muted" style={{ wordBreak: 'break-all' }}>contract address: <a className="blue" href={`${cfg.explorer}/token/${c.window?.pumpMint || c.mint}`} target="_blank" rel="noreferrer">{c.window?.pumpMint || c.mint}</a></div>
-          </div>
-          <div className="panel sm">
-            {c.kind !== 'window' && <>
+          <CoinInfo c={c} cfg={cfg} />
+          {c.kind !== 'window' && <div className="panel sm">
             <div>bonding curve progress: {curveProgress}%</div>
             <div className="bar"><i style={{ width: `${curveProgress}%` }} /></div>
-            <p className="muted xs" style={{ margin: 0 }}>
-              {c.complete ? 'this coin is On Pumpfun, where it trades now.' :
-                <>when the market cap reaches {usdK(GRADUATION_CAP_SOL * (c.solUsd || 0))} all the liquidity from the bonding curve will be deposited into the token on Pumpfun.</>}
-            </p>
-            </>}
-            {!c.window?.pumpMint && <>
-            <div>king of the hill progress: {koth}%</div>
-            <div className="bar koth"><i style={{ width: `${koth}%` }} /></div>
-            <p className="muted xs" style={{ margin: 0 }}>{isKing ? `this coin is the king of the hill${c.crownedAt ? `, crowned ${ago(c.crownedAt)}` : ''}` : c.king ? `dethrone the current king (${c.king.symbol}) at ${usdK(kothBar)} mcap` : `take the crown at ${usdK(kothBar)} mcap`}</p>
-            </>}
-          </div>
+            {c.complete && <p className="muted xs" style={{ margin: 0 }}>this coin is On Pumpfun, where it trades now.</p>}
+          </div>}
           <div className="panel sm">
             <div className="b">holder distribution</div>
             <div className="holders">
@@ -193,6 +152,32 @@ export default function Coin({ mint, cfg }) {
         </aside>
       </div>
     </main>
+  );
+}
+
+/** The coin's card: who it is, its links and its address, copied in one press. */
+function CoinInfo({ c, cfg }) {
+  const [copied, setCopied] = useState(false);
+  const address = c.window?.pumpMint || c.mint;
+  const copy = () => { navigator.clipboard?.writeText(address).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {}); };
+  const links = [
+    c.socials?.twitter && [c.socials.twitter, <XIcon key="x" />, 'X'],
+    c.socials?.telegram && [c.socials.telegram, <Icon key="t" n="send" s={15} />, 'Telegram'],
+    c.socials?.website && [c.socials.website, <Icon key="w" n="globe" s={15} />, 'Website'],
+  ].filter(Boolean);
+  return (
+    <div className="panel ci">
+      <div className="ci-head">
+        <img src={c.image} alt="" />
+        <div className="ci-title"><h3>{c.name}</h3><span>${c.symbol}</span></div>
+      </div>
+      {c.description && <p className="ci-desc">{c.description}</p>}
+      {links.length > 0 && <div className="ci-links">{links.map(([href, icon, label]) => <a key={label} href={href} target="_blank" rel="noreferrer">{icon}{label}</a>)}</div>}
+      <div className="ci-ca">
+        <a href={`${cfg.explorer}/token/${address}`} target="_blank" rel="noreferrer" title={address}><small>CA:</small><span>{short(address, 6)}</span></a>
+        <button onClick={copy} aria-label="Copy contract address"><Icon n="copy" s={15} />{copied ? 'Copied' : 'Copy'}</button>
+      </div>
+    </div>
   );
 }
 
@@ -226,60 +211,6 @@ function CreatorFees({ c, onDone }) {
       {error && <div className="err">{error}</div>}
       {msg && <div className="ok">{msg}</div>}
       <button className="btn wide" disabled={busy || f.pending || owed < min} onClick={collect}>{busy ? <><Spinner /> collecting</> : f.pending ? 'collecting' : 'collect'}</button>
-    </div>
-  );
-}
-
-function Thread({ c, onPosted }) {
-  const w = useWallet();
-  const [open, setOpen] = useState(false);
-  const [text, setText] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const post = async () => {
-    setError(null);
-    setBusy(true);
-    try {
-      const { acct } = await w.connect();
-      const ts = Date.now();
-      const body = text.trim();
-      // Signed and sent as the SAME string: the server verifies exactly what it receives.
-      const signature = await w.signMessage(`pump reply\nmint: ${c.mint}\ntime: ${ts}\n\n${body}`);
-      const replies = await api.reply(c.mint, { wallet: acct.address, text: body, ts, signature });
-      onPosted(replies);
-      setText('');
-      setOpen(false);
-    } catch (e) {
-      if (!cancelled(e)) setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <div className="thread">
-      <div className="reply">
-        <div className="meta"><i className="avatar" style={{ background: colorOf(c.creator) }} /><span className="blue">{shortName(c.creator)}</span> (dev) <span>{ago(c.createdAt)}</span>{c.sig && <a className="muted" href={`https://solscan.io/tx/${c.sig}`} target="_blank" rel="noreferrer">launch tx</a>}</div>
-        <div className="row" style={{ alignItems: 'flex-start' }}><img src={c.image} alt="" style={{ width: 96, height: 96, borderRadius: 12, objectFit: 'cover' }} /><div><span className="b">{c.name} ({c.symbol})</span>{c.description ? `: ${c.description}` : ''}</div></div>
-      </div>
-      {c.replies.map((r) => (
-        <div className="reply" key={r.id}>
-          <div className="meta"><i className="avatar" style={{ background: colorOf(r.wallet) }} /><span className="blue">{shortName(r.wallet)}</span>{r.wallet === c.creator && ' (dev)'}<span>{ago(r.at)}</span><span>#{r.id}</span></div>
-          <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{r.text}</div>
-        </div>
-      ))}
-      <button className="bracket" style={{ justifySelf: 'start' }} onClick={() => setOpen(true)}>[post a reply]</button>
-      {open && (
-        <Modal onClose={() => !busy && setOpen(false)}>
-          <h2>add a comment</h2>
-          <textarea value={text} onChange={(e) => setText(e.target.value)} maxLength={500} placeholder="comment" />
-          {error && <div className="err">{error}</div>}
-          <div className="row">
-            <button className="btn" disabled={busy || !text.trim()} onClick={post}>{busy ? <><Spinner /> signing</> : 'post reply'}</button>
-            <button className="bracket" onClick={() => setOpen(false)}>[cancel]</button>
-          </div>
-          <p className="muted xs">your wallet signs the comment (no transaction, no fee) so nobody can post as you.</p>
-        </Modal>
-      )}
     </div>
   );
 }
@@ -344,7 +275,7 @@ function TradePanel({ c, cfg, onTraded }) {
     }
   };
   const win = c.kind === 'window' ? c.window : null;
-  const blocked = win ? (win.phase === 'opening' ? 'the anti-snipe tax is on for a few seconds' : win.phase === 'ended' ? 'this window ended with no holders' : win.phase === 'graduated' && (win.venue === 'PumpSwap' || win.pair?.state === 'swapped') ? 'trade this coin on Pumpfun' : win.phase === 'closing' || win.phase === 'graduating' ? 'migrating to pump.fun: trading resumes there in a few minutes' : null) : c.complete ? 'graduated' : null;
+  const blocked = win ? (win.phase === 'opening' ? 'the anti-snipe tax is on for a few seconds' : win.phase === 'ended' ? 'this window ended with no holders' : win.phase === 'graduated' && (win.venue === 'PumpSwap' || win.pair?.state === 'swapped') ? 'trade this coin on Pumpfun' : win.phase === 'closing' || win.phase === 'graduating' ? 'migrating to Pumpfun: trading resumes there in a few minutes' : null) : c.complete ? 'graduated' : null;
   if (win && win.phase === 'graduated' && (win.venue === 'PumpSwap' || win.pair?.state === 'swapped')) {
     return <div className="panel sm"><div className="muted">this coin trades on Pumpfun.</div><a className="btn wide" href={pumpLink(win.pumpMint)} target="_blank" rel="noreferrer">trade on Pumpfun</a></div>;
   }
@@ -376,9 +307,8 @@ function TradePanel({ c, cfg, onTraded }) {
         </>
       )}
       {!win && c.complete && <div className="muted xs">this coin is On Pumpfun: trade it on <a className="green" href={pumpLink(c.mint)} target="_blank" rel="noreferrer">Pumpfun</a>.</div>}
-      {win && blocked && <div className="muted xs">{blocked}.</div>}
+      {win && blocked && win.phase !== 'opening' && <div className="muted xs">{blocked}.</div>}
       {c.quote && <div className="muted xs">this coin is paired with another token: trade it on <a className="green" href={pumpLink(c.mint)} target="_blank" rel="noreferrer">pump.fun</a>.</div>}
-      {win && win.phase === 'graduated' && (win.venue === 'PumpSwap' || win.pair?.state === 'swapped' ? <div className="muted xs">this coin trades on Pumpfun: <a className="green" href={pumpLink(win.pumpMint)} target="_blank" rel="noreferrer">trade it there</a>.</div> : <div className="muted xs">trades here go to the Pumpfun coin.</div>)}
       {error && <div className="err">{error}</div>}
       {msg && <div className="ok">{msg}</div>}
       <button className="btn wide" disabled={disabled} onClick={trade}>
@@ -386,7 +316,7 @@ function TradePanel({ c, cfg, onTraded }) {
       </button>
       {slipOpen && (
         <Modal onClose={() => setSlipOpen(false)}>
-          <h2>set max slippage (%)</h2>
+          <h2 style={{ textAlign: 'center' }}>set max slippage (%)</h2>
           <input type="number" min="0.1" max="50" step="0.1" value={slippage} onChange={(e) => setSlippage(e.target.value)} onBlur={() => { const n = Number(slippage); setSlippage(String(n >= 0.1 && n <= 50 ? n : 5)); }} />
           <p className="muted sm">this is the maximum amount of slippage you are willing to accept when placing trades</p>
           <button className="btn" onClick={() => setSlipOpen(false)}>close</button>

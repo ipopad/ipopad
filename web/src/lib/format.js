@@ -22,3 +22,4 @@ export const pumpLink = (mint) => `https://pump.fun/coin/${mint}`;
 /** A stable pastel for an address (the ticker boxes and avatars), like the old site's random user colours. */
 const PALETTE = ['#60a5fa', '#f472b6', '#fbbf24', '#34d399', '#a78bfa', '#fb923c', '#f87171', '#22d3ee'];
 export const colorOf = (s) => { let h = 0; for (const c of String(s || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; };
+export const count = (n) => (n == null ? '–' : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${(n / 1e3).toFixed(1)}K` : n.toLocaleString('en-US'));

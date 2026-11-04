@@ -51,10 +51,13 @@ try {
   for (let i = 0; i < 90 && !(cfg?.window?.ready); i++) { await sleep(2000); cfg = await api('/api/config').catch(() => null); }
   await sleep(5000);
   const me = creator.publicKey.toBase58(), other = buyer.publicKey.toBase58();
+  const other0 = buyer.publicKey.toBase58();
   const form = { name: 'Initial Pump Offering Official Ip', symbol: 'IPOFFICIAL', description: 'x', imageData: `data:image/png;base64,${PNG}`, twitter: 'https://x.com/LaunchOnIPO', website: 'https://ipopad.app' };
   ok(cfg.launchOpen === false && cfg.officialLaunch === false, 'launching is closed for the public');
   const mine = await api(`/api/config?wallet=${me}`);
   ok(mine.officialLaunch === true && mine.launchOpen === true && mine.devBuyReady === true, 'the official wallet sees the official launch, first buy ready');
+  ok(mine.officialPreset?.symbol === 'IPO' && cfg.officialPreset === null && (await api(`/api/config?wallet=${other0}`)).officialPreset === null, 'only the official wallet gets the filled-in form');
+  ok((await api('/api/status')).launchOpen === false, 'the cheap status says closed');
   await refused(api('/api/launch/prepare', { wallet: other, official: true, ...form, devBuySol: 1 }), /not available/, 'another wallet cannot make the official launch');
   await refused(api('/api/launch/prepare', { wallet: me, official: true, ...form, devBuySol: 1, noProof: true }), /stale|signature/, 'naming the official wallet without its signature is refused');
   await refused(api('/api/launch/prepare', { wallet: me, official: true, ...form, devBuySol: 1, noProof: true, ts: Date.now(), signature: bs58.encode(new Uint8Array(64).fill(7)) }), /signature/, 'a made-up signature is refused');
@@ -91,6 +94,7 @@ try {
   console.log(`   cost ${(before - await conn.getBalance(creator.publicKey)) / 1e9} SOL`);
   const open = await api('/api/config');
   ok(open.launchOpen === true && open.official?.mint === p.mint, 'launching opened for everyone, and it is the official coin');
+  ok((await api('/api/status')).launchOpen === true, 'the cheap status says open');
   ok((await api(`/api/config?wallet=${me}`)).officialLaunch === false, 'the official launch is used up');
   await refused(api('/api/launch/prepare', { wallet: me, official: true, ...form, symbol: 'AGAIN', devBuySol: 0 }), /not available/, 'it cannot be used twice');
   { // a request the URL parser refuses must not take the server down
@@ -118,7 +122,9 @@ try {
     }
     ok(n >= 1 && n <= 8 && /unfinished/.test(why ?? ''), `unsigned launches from one place stop at ${n}: ${why}`);
   }
-  await refused(api('/api/launch/prepare', { wallet: other, name: 'Plain', symbol: 'PLAIN', imageData: `data:image/png;base64,${PNG}`, devBuySol: 0 }), /opens soon/, 'but nobody else gets a plain Pumpfun launch');
+  await refused(api('/api/launch/prepare', { wallet: other, name: 'Plain', symbol: 'PLAIN', imageData: `data:image/png;base64,${PNG}`, devBuySol: 0 }), /not available/, 'but nobody else gets a plain Pumpfun launch');
+  await refused(api('/api/launch/prepare', { wallet: other, official: true, name: 'Plain', symbol: 'PLAIN', imageData: `data:image/png;base64,${PNG}`, devBuySol: 0 }), /not available/, 'not by asking for the official launch either');
+  ok((await api(`/api/config?wallet=${other}`)).officialLaunch === false, 'and the official launch is never offered to them');
 } catch (e) { fails++; console.log('FAIL (threw)', e.message); }
 for (const p of procs) p.kill('SIGTERM');
 stub.close();

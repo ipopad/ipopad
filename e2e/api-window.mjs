@@ -134,7 +134,7 @@ try {
   if (!good) { console.log('   window:', JSON.stringify(c.window)); await sleep(6000); const c2 = await api(`/api/coins/${p.mint}`); console.log('   6s later raised', c2.window.raisedSol, 'phase', c2.window.phase); }
   { await api(`/api/coins/${p.mint}/chart`); await sleep(4000); const ch = await api(`/api/coins/${p.mint}/chart`); ok(ch.total >= 2 && ch.trades.some((t) => t.side === 'buy') && ch.trades.some((t) => t.side === 'sell') && ch.candles.length >= 1, `chart from the Meteora pool's own trades: ${ch.total} trades, ${ch.candles.length} candles`); }
   const board = await api('/api/coins');
-  ok(board.coins.length === 2 && board.king?.mint === p.mint, 'board lists both windows, the traded one as king');
+  ok(board.coins.length === 2, 'board lists both windows');
   console.log('   waiting for the window to close and the graduator to run');
   for (let i = 0; i < 60 && !(c.window?.pumpMint); i++) { await sleep(4000); c = await api(`/api/coins/${p.mint}`).catch(() => c); }
   ok(c.window?.pumpMint, `graduated: pump.fun coin ${c.window?.pumpMint} (status ${c.window?.status}, fronted ${c.window?.fronted} SOL, raise ${c.window?.raise} SOL)`);

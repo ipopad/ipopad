@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0b0b0e" />
-    <title>IPO</title>
+    <title>Initial Pump Offering</title>
     <meta name="description" content="Initial Pump Offering. Launch a coin on its own curve with your own rules. When it fills, it migrates to Pumpfun and every holder receives the new coin." />
     <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
     <link rel="icon" href="/icon-32.png" type="image/png" sizes="32x32" />
@@ -23,10 +23,34 @@
     <meta property="og:url" content="https://ipopad.app" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100..125,600..900&family=Geist:wght@300..700&family=Geist+Mono:wght@400..600&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100..125,600..900&family=Inter:wght@300..900&family=Geist:wght@300..700&family=Geist+Mono:wght@400..600&display=swap" rel="stylesheet" />
+    <style>
+      html { background: #0b0b0e; }
+      body { margin: 0; }
+      .crash { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px 20px; box-sizing: border-box; text-align: center; color: #e4e4e7; font: 15px/1.6 "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .crash.in-page { min-height: 62vh; }
+      .crash-mark { width: 72px; height: 72px; border-radius: 20px; margin-bottom: 26px; box-shadow: 0 0 70px rgba(27,108,200,.45); }
+      .crash h1 { margin: 0 0 10px; color: #f4f4f5; font: 800 clamp(26px, 6vw, 36px)/1.15 "Archivo", "Geist", system-ui, sans-serif; letter-spacing: -.01em; }
+      .crash p { margin: 0 0 28px; max-width: 440px; color: #a1a1aa; }
+      .crash-row { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+      .crash-btn { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; height: 46px; min-width: 132px; padding: 0 22px; border: 1px solid transparent; border-radius: 999px; background: #1b6cc8; color: #fff; font: 600 15px "Geist", system-ui, sans-serif; text-decoration: none; cursor: pointer; transition: background .15s; }
+      .crash-btn:hover { background: #1558a6; }
+      .crash-btn.quiet { background: rgba(255,255,255,.03); border-color: #2f2f35; color: #e4e4e7; }
+      .crash-btn.quiet:hover { background: rgba(255,255,255,.07); }
+      .crash-help { margin-top: 22px; color: #71717a; font-size: 13px; text-decoration: none; }
+      .crash-help:hover { color: #5ea5f2; }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // The bundle failed to load or threw before React started: same page, no React. React replaces it if it mounts late.
+      addEventListener('load', function () { setTimeout(function () {
+        var r = document.getElementById('root');
+        if (r.firstChild) return;
+        r.innerHTML = '<main class="crash" role="alert"><img class="crash-mark" src="/icon-192.png" alt="" width="72" height="72"><h1>Something broke on this page</h1><p>This is a display problem. Your wallet and your coins are on chain and are not affected. Reloading usually brings it back.</p><div class="crash-row"><button class="crash-btn" onclick="location.reload()">Reload</button><a class="crash-btn quiet" href="/">Go home</a></div><a class="crash-help" href="https://x.com/LaunchOnIPO" target="_blank" rel="noreferrer">Still broken? Tell us on X</a></main>';
+      }, 2000); });
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

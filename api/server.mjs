@@ -58,26 +58,26 @@ const mintOf = (p) => sol.requireMint(p.mint).toBase58();
 // asked on the box itself: Caddy always adds x-forwarded-for, so nothing from outside can look local
 const isLocal = (req) => !req.headers['x-forwarded-for'] && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
 route('GET', '/api/config', async ({ query, req }) => ({
-  launchReady: launch.configured(), launchOpen: launch.launchOpen() || launch.launchAllowed(query.get('wallet')) || launch.officialAllowed(query.get('wallet')), officialLaunch: launch.officialAllowed(query.get('wallet')), windowOnly: launch.WINDOW_ONLY, publicUrl: launch.PUBLIC_URL, official: coins.official(), devBuyReady: await launch.devBuyReady(), maxDevBuySol: launch.MAX_DEV_BUY_SOL, deployCostSol: Number(launch.DEPLOY_COST_LAMPORTS) / 1e9,
+  launchReady: launch.configured(), launchOpen: launch.launchOpen() || launch.launchAllowed(query.get('wallet')) || launch.officialAllowed(query.get('wallet')), officialLaunch: launch.officialAllowed(query.get('wallet')), officialPreset: launch.officialAllowed(query.get('wallet')) ? launch.OFFICIAL_PRESET : null, windowOnly: launch.WINDOW_ONLY, publicUrl: launch.PUBLIC_URL, official: coins.official(), devBuyReady: await launch.devBuyReady(), maxDevBuySol: launch.MAX_DEV_BUY_SOL, deployCostSol: Number(launch.DEPLOY_COST_LAMPORTS) / 1e9,
   vanity: { ready: !vanity.REQUIRED || vanity.available() > 0, required: vanity.REQUIRED, suffix: vanity.SUFFIX, launchSuffix: vanity.LAUNCH_SUFFIX, ...(isLocal(req) ? { available: vanity.available(), fresh: vanity.freshCount(), reserve: vanity.GRADUATION_RESERVE } : {}) }, explorer: sol.EXPLORER, solUsd: await sol.solUsd().catch(() => null),
   tickerFee: { sol: 1, hours: 24 },
-  limits: { name: launch.NAME_MAX, symbol: launch.SYMBOL_MAX, description: launch.DESCRIPTION_MAX, reply: coins.REPLY_MAX },
+  limits: { name: launch.NAME_MAX, symbol: launch.SYMBOL_MAX, description: launch.DESCRIPTION_MAX },
   window: { firstBuyMaxSol: await window.firstBuyMaxLamports().then((l) => (l == null ? null : Number(l) / 1e9)).catch(() => null), firstBuyMaxPct: window.FIRST_BUY_MAX_SUPPLY_PCT, ready: await window.ready().catch(() => false), sizes: await window.sizes().catch(() => []), limits: window.LIMITS, platform: window.PLATFORM.toBase58(), hookProgram: window.HOOK_PROGRAM.toBase58(), deployCostSol: Number(launch.WINDOW_DEPLOY_COST_LAMPORTS) / 1e9, rules: true },
 }));
+route('GET', '/api/status', async () => ({ launchOpen: launch.launchOpen() })); // no RPC: every waiting visitor polls it
 route('GET', '/api/health', async ({ req }) => (isLocal(req) ? { ok: true, rpc: sol.rpcUsage(), vanityFresh: vanity.freshCount(), vanityLaunchFresh: vanity.freshLaunchCount(), launchReady: launch.configured() } : { ok: true }));
 route('GET', '/api/ops', async ({ req }) => { if (!isLocal(req)) throw new ApiError('Not found', 404); return opsReport(); });
 route('GET', '/api/coins', async ({ query }) => coins.list({ sort: query.get('sort') || 'bump', order: query.get('order') || 'desc', q: query.get('q') || '' }));
+route('GET', '/api/stats', async () => coins.stats());
 route('GET', '/api/ticker', async () => coins.ticker());
 route('GET', '/api/analytics', async ({ ip }) => { limit(ip, 'analytics', 120, 60_000); return analytics(); });
 route('GET', '/api/pairs/:mint', async ({ params, ip }) => { limit(ip, 'pairlookup', 60, 600_000); try { return await window.lookup(String(params.mint)); } catch (e) { if (e.transient) return { ok: false, why: e.message }; throw e; } });
 route('GET', '/api/pairs/:mint/curve', async ({ params, ip }) => { limit(ip, 'paircurve', 60, 600_000); return window.pairCurve(String(params.mint)); });
 route('GET', '/api/pairs', async () => ({ pairs: (await window.pairs().catch(() => [])).map((p) => ({ mint: p.mint, symbol: p.symbol, name: p.name, icon: p.icon, liquidity: p.liquidity, mcap: p.mcap ?? 0, verified: Boolean(p.verified), category: p.category ?? 'crypto', kind: p.kind ?? 'control' })), maxCreatorFeeBps: window.MAX_CREATOR_FEE_BPS }));
 route('GET', '/api/coins/:mint', async ({ params }) => coins.coin(mintOf(params)));
-route('GET', '/api/coins/:mint/replies', async ({ params }) => coins.replies(mintOf(params)));
 // the chart and the trades tab, from the chain: indexes what is new first (rate-limited per coin), then answers
 route('GET', '/api/coins/:mint/chart', async ({ params, ip, query }) => { limit(ip, 'chart', 240, 600_000); const m = mintOf(params); const c = await coins.coin(m); /* 404 unless listed: never index a stranger's coin */ history.index(m); return { ...history.chart(m, c?.priceSol ?? null, query.get('interval')), supply: c?.capSol && c?.priceSol ? c.capSol / c.priceSol : 1e9 }; });
 route('POST', '/api/coins/:mint/creator-fee', async ({ params, body, ip }) => { limit(ip, 'creatorfee', 20, 600_000); return window.collectFee({ mint: mintOf(params), wallet: String(body.wallet || ''), ts: body.ts, signature: body.signature }); });
-route('POST', '/api/coins/:mint/replies', async ({ params, body, ip }) => { limit(ip, 'reply', 30, 600_000); return coins.postReply({ ...body, mint: mintOf(params) }); });
 route('GET', '/api/launch/ticker', async ({ query, ip }) => { limit(ip, 'tickercheck', 240, 600_000); return launch.tickerStatus(query.get('symbol')); });
 route('POST', '/api/launch/prepare', async ({ body, ip }) => { limit(ip, 'prepare', 30, 60_000); return launch.prepare(body, ip); });
 route('POST', '/api/launch/submit', async ({ body, ip }) => { limit(ip, 'submit', 30, 60_000); return launch.submit(body); });
