@@ -67,7 +67,7 @@ export default function Board({ cfg = {} }) {
         <h1><Wordmark /></h1>
         <p className="pf-lede">A better way to launch on Pumpfun</p>
         <div className="pf-hero-cta">
-          <Link href="/launch" className="pf-btn primary big">START NOW</Link>
+          <Link href="/launch" className="pf-btn primary big">LAUNCH</Link>
           <Link href="/explore" className="pf-btn quiet big">EXPLORE</Link>
         </div>
         {official && (

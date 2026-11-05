@@ -195,6 +195,8 @@ export default function Create({ cfg }) {
             <div className="panel lsec">
               <div className="lsec-title"><span className="num">2</span><h2>Official launch</h2></div>
               <p className="sec-lede">a normal SOL pair on Pumpfun, no curve and no rules here. the address ends in {cfg.vanity?.suffix ?? 'ipo'}. launching opens for everyone the moment it lands.</p>
+              {cfg.devBuyReady && <div className="field"><label>initial dev buy (optional)</label>
+                <div className="amount"><input type="number" min="0" step="0.01" max={cfg.maxDevBuySol} value={devBuy} onChange={(e) => setDevBuy(e.target.value)} placeholder="0.0 (optional)" disabled={Boolean(step)} /><span className="unit">SOL</span></div></div>}
             </div>
           )}
           {windows?.rules && (
