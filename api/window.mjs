@@ -27,6 +27,8 @@ import { loadLut } from '../hk/lib/lut.mjs';
 import { openDb, getLaunch as ledgerLaunch, registerLaunch } from '../hk/lib/db.mjs';
 import { LAUNCHED_STATUSES } from '../hk/lib/graduate.mjs';
 import { pumpMarketCap } from '../hk/lib/pumpprice.mjs';
+import { getKv, setKv } from './db.mjs';
+import * as images from './images.mjs';
 import { listPairs, lookupPair, MAX_CREATOR_FEE_BPS, USDC_ENTRY, USDC_MINT } from '../hk/lib/pairs.mjs';
 import { ensurePairConfig, pairCurveBucket, pairCurveParams } from '../hk/lib/configs.mjs';
 import { pumpParamsKey, pairStartSol } from '../hk/lib/curve.mjs';
@@ -313,7 +315,50 @@ const pairQuote = sol.sharedMap(async (pair) => {
 }, 60_000);
 
 /** pump.fun's custom pairs a coin may migrate into (its quote-control list, deep liquidity only), shared for 10 minutes. */
-export const pairs = sol.shared(async () => [USDC_ENTRY, ...(await listPairs(sol.conn))], 600_000);
+// Jupiter or the RPC can fail for a moment on this shared box: then the last good list serves, and a failure waits 15 s before the next try.
+let pairsFailedAt = 0;
+export const pairs = sol.shared(async () => {
+  try {
+    if (Date.now() - pairsFailedAt < 15_000) throw new Error('waiting after a failed read');
+    const list = await listPairs(sol.conn);
+    setKv('pairsLast', list);
+    return [USDC_ENTRY, ...list];
+  } catch (e) {
+    if (Date.now() - pairsFailedAt >= 15_000) { pairsFailedAt = Date.now(); console.error('[pairs]', String(e.message).replace(/api-key=[^&\s]+/g, 'api-key=***').slice(0, 200)); }
+    const last = getKv('pairsLast', null);
+    if (last?.length) return [USDC_ENTRY, ...last];
+    throw e;
+  }
+}, 600_000);
+/**
+ * Pair logos are served from our own folder, small and square: the links on the list point at hosts that refuse (ipfs.io 403),
+ * rate-limit or send 1.5 MB originals. Fetched one at a time in the background; until one is ready, or if it never is, the
+ * original link is shown and the picker falls back to a letter. SVGs keep their link: the image store takes no SVG.
+ */
+let iconsRunning = false;
+export const pairIconPaths = () => Object.values(getKv('pairIcons', {}) || {}).map((x) => x.path);
+async function cachePairIcons(list) {
+  if (iconsRunning) return;
+  iconsRunning = true;
+  try {
+    const done = getKv('pairIcons', {}) || {};
+    for (const p of list) {
+      if (done[p.mint]?.from === p.icon || !p.icon) continue;
+      const path = await images.cacheImage(p.icon).catch(() => null);
+      if (path) { done[p.mint] = { from: p.icon, path }; setKv('pairIcons', done); }
+    }
+  } finally { iconsRunning = false; }
+}
+const iconed = (list) => {
+  const done = getKv('pairIcons', {}) || {};
+  return list.map((p) => (done[p.mint]?.from === p.icon ? { ...p, icon: done[p.mint].path } : p));
+};
+/** Never empty: USDC needs no outside read. */
+export const pairsSafe = async () => {
+  const list = await pairs().catch(() => [USDC_ENTRY]);
+  cachePairIcons(list).catch(() => {});
+  return iconed(list);
+};
 /** A pasted CA, looked up once per 10 minutes per mint. */
 export const lookup = sol.sharedMap(async (mint) => {
   const r = await lookupPair(sol.conn, mint);
@@ -369,7 +414,7 @@ const pairConfig = (args) => {
 /** Validates a creator's pair choice: null (SOL) or { mint, symbol, creatorFeeBps }. */
 export async function validatePair(mint, creatorFeeBps) {
   if (!mint) { if (creatorFeeBps) throw new ApiError('A Pumpfun creator fee needs a custom pair (Pumpfun ignores it on SOL).'); return null; }
-  let p = (await pairs().catch(() => [])).find((x) => x.mint === String(mint));
+  let p = (await pairsSafe()).find((x) => x.mint === String(mint));
   if (!p) { const r = await lookup(String(mint)).catch(() => null); if (!r?.ok) throw new ApiError(r?.why ? `That pair cannot be used: ${r.why}.` : 'That pair cannot be checked right now. Try again.'); p = r.pair; }
   if (p.kind === 'pumpcoin') throw new ApiError("Pick a token from Pumpfun's custom-pair list.");
   const fee = creatorFeeBps == null || creatorFeeBps === '' ? 0 : Number(creatorFeeBps);

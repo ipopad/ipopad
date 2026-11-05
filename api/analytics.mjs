@@ -103,7 +103,7 @@ async function build() {
   const rows = all("SELECT mint, launcher, symbol, name, image, kind, origin, size_sol, holder_rewards, ticker_fee, created_at FROM launches WHERE status = 'live'");
   const coins = rows.filter((r) => r.kind === 'window');
   const ledgerRows = new Map(window.ledger.prepare('SELECT * FROM launches').all().map((l) => [l.mint, l]));
-  const pairList = await window.pairs().catch(() => []);
+  const pairList = await window.pairsSafe();
   const pairInfo = new Map(pairList.map((p) => [p.mint, p]));
   const siteTrades = all("SELECT mint, wallet, lamports, created_at AS at FROM trades WHERE side IN ('buy', 'sell', 'create')");
   const tradesByMint = new Map();

@@ -47,6 +47,8 @@ export function imageType(b) {
 }
 
 export function ipfsPath(url) {
+  const sub = String(url).match(/^https:\/\/([a-z0-9]{40,})\.ipfs\.[^/]+\/?([^?#]*)/); // <cid>.ipfs.<host>/<path>
+  if (sub) return sub[2] ? `${sub[1]}/${sub[2]}` : sub[1];
   const m = String(url).match(/^ipfs:\/\/(.+)$/) ?? String(url).match(/\/ipfs\/([A-Za-z0-9][A-Za-z0-9._\-/]*)/);
   return m ? m[1].replace(/[?#].*$/, '') : null;
 }
@@ -77,7 +79,7 @@ export async function cacheImage(url, { timeoutMs = 8000 } = {}) {
   const u = String(url ?? '').trim();
   if (!u) return null;
   if (u.startsWith('/api/logos/')) return u;
-  if (!/^https:\/\//.test(u) && !u.startsWith('ipfs://')) return null;
+  if (!/^https:\/\//i.test(u) && !u.startsWith('ipfs://')) return null;
   if (Date.now() - (failed.get(u) || 0) < 3_600_000) return null;
   const cid = ipfsPath(u);
   const candidates = cid ? [...GATEWAYS.map((g) => `${g}/${cid}`), ...(GATEWAYS.some((g) => u.startsWith(g)) || u.startsWith('ipfs://') ? [] : [u])] : [u];

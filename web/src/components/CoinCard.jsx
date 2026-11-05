@@ -15,7 +15,7 @@ export function phaseOf(c) {
 
 /** The pair a coin is launched against, unless it is SOL or the pair fell back to SOL. */
 export const pairOf = (c) => (c.window?.pair && c.window.pair.state !== 'fallback' ? c.window.pair : null);
-export const PairTag = ({ pair }) => <span className="pf-pair">{pair.icon && <img src={pair.icon} alt="" />}Paired with {pair.symbol}</span>;
+export const PairTag = ({ pair }) => <span className="pf-pair">{pair.icon && <img src={pair.icon} alt="" loading="lazy" onError={(e) => { e.currentTarget.style.display = 'none'; }} />}Paired with {pair.symbol}</span>;
 
 export default function CoinCard({ c, flash = false, className = '' }) {
   const phase = phaseOf(c);

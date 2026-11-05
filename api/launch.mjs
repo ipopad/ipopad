@@ -465,6 +465,6 @@ export async function reconcile() {
     if (!window.ledgerHas(r.mint)) { if (await registerWindow(r)) n++; }
   }
   run("UPDATE launches SET status = 'failed', updated_at = ? WHERE status = 'prepared' AND created_at < ?", now(), now() - 30 * 60_000);
-  if (now() - lastGc > 6 * 3_600_000) { lastGc = now(); try { images.gc((await import('./db.mjs')).all("SELECT image FROM launches WHERE status IN ('live', 'created', 'prepared', 'hidden')").map((x) => x.image)); } catch {} }
+  if (now() - lastGc > 6 * 3_600_000) { lastGc = now(); try { images.gc((await import('./db.mjs')).all("SELECT image FROM launches WHERE status IN ('live', 'created', 'prepared', 'hidden')").map((x) => x.image).concat(window.pairIconPaths())); } catch {} }
   return n;
 }

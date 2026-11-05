@@ -222,9 +222,8 @@ export default function Create({ cfg }) {
             </div>
             <div className="ptok-rules">
               {official && <div className="prule"><span className="rdot" style={{ background: '#86efac', color: '#86efac' }} /><span className="prule-t">normal SOL pair on Pumpfun</span><span className="prule-k">OFFICIAL</span></div>}
-              {!official && maxWalletPct > 0 && <div className="prule"><span className="rdot" style={{ background: '#86efac', color: '#86efac' }} /><span className="prule-t">max per wallet {maxWalletPct}%</span><span className="prule-k">fair launch</span></div>}
+              {!official && ['anti-snipe tax, first 3 seconds', `max per wallet ${maxWalletPct}%`, 'trade guard 3%'].map((t) => <div key={t} className="prule"><span className="rdot" style={{ background: '#86efac', color: '#86efac' }} /><span className="prule-t">{t}</span><span className="prule-k">always on</span></div>)}
               {picked.map((x) => <div key={x.id} className="prule"><span className="rdot" style={{ background: RULE_COLOR[x.id], color: RULE_COLOR[x.id] }} /><span className="prule-t">{x.t}</span><span className="prule-k">{x.group}</span></div>)}
-              {!official && !picked.length && !(maxWalletPct > 0) && <div className="prule dim">no rules picked</div>}
             </div>
             {windows && <div className="ptok-foot"><span>{sizeNow ? `${capText(sizeNow)} market cap` : ''}</span><span>then pump.fun</span></div>}
           </div>
@@ -246,7 +245,9 @@ export default function Create({ cfg }) {
             <div><span className="muted">migrates to Pumpfun at:</span> {(() => { const x = sizes.find((y) => y.sizeSol === size); return (x && capOf(x)) ? `${Math.round(capOf(x))} SOL market cap${cfg.solUsd ? ` (~$${(capOf(x) * cfg.solUsd / 1000).toFixed(1)}k)` : ''}` : `${size} SOL`; })()}</div>
             <div><span className="muted">pair:</span> {pair ? `${pair.symbol}${pairFee && pair.kind !== 'usdc' ? `, ${pairFee / 100}% Pumpfun creator fee` : ''}` : 'SOL'}</div>
             <div><span className="muted">creator rewards:</span> {rewards === 'holders' ? 'Holders' : 'Creator'}</div>
+            <div><span className="muted">anti-snipe tax:</span> first 3 seconds</div>
             <div><span className="muted">max per wallet:</span> {maxWalletPct ? `${maxWalletPct}% of supply` : 'off'}</div>
+            <div><span className="muted">trade guard:</span> 3% of supply</div>
             {ruleLines.length > 0 && <div><div className="muted">rules on its curve, until it migrates:</div><RulesLines lines={ruleLines} className="xs" /></div>}
             {listed && listed.wallets.length > 0 && <div><span className="muted">list:</span> {listed.wallets.length} wallet{listed.wallets.length === 1 ? '' : 's'}{rf.seal ? ', sealed right after launch' : ''}. you approve the list transactions in your wallet after the launch.</div>}
             {listed && listed.wallets.length === 0 && <div><span className="muted">list:</span> empty for now. {rf.on.allowlist ? 'nobody but you can buy until you add wallets from the coin page (within a day).' : 'add wallets from the coin page within a day.'}</div>}

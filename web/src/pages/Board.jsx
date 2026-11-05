@@ -65,7 +65,7 @@ export default function Board({ cfg = {} }) {
       <section className="pf-hero">
         <div className="pf-hero-mark"><img src="/icon-512.png" alt="" width="200" height="200" /></div>
         <h1><Wordmark /></h1>
-        <p className="pf-lede">Launch a coin on its own fair curve with rules the token enforces. When it fills, it moves to Pumpfun and every holder gets the new coin</p>
+        <p className="pf-lede">A better way to launch on Pumpfun</p>
         <div className="pf-hero-cta">
           <Link href="/launch" className="pf-btn primary big">START NOW</Link>
           <Link href="/explore" className="pf-btn quiet big">EXPLORE</Link>

@@ -24,7 +24,7 @@ async function view(row, solUsd) {
   let st = null, win = null;
   if (row.kind === 'window') {
     try { win = await window.summary(row.mint, { fresh: forgetKeys.delete(row.mint) }); } catch (e) { console.error('[window] summary', row.mint, e.message); }
-    if (win?.pair) { const p = (await window.pairs().catch(() => [])).find((x) => x.mint === win.pair.mint); win = { ...win, pair: { ...win.pair, symbol: p?.symbol ?? win.pair.mint.slice(0, 4), icon: p?.icon ?? null } }; }
+    if (win?.pair) { const p = (await window.pairsSafe()).find((x) => x.mint === win.pair.mint); win = { ...win, pair: { ...win.pair, symbol: p?.symbol ?? win.pair.mint.slice(0, 4), icon: p?.icon ?? null } }; }
     if (win) st = { complete: win.phase === 'graduated' || win.phase === 'graduating', priceSol: win.priceSol, capSol: win.capSol, progress: win.progress, realSol: win.raisedSol, tokensLeft: null, pool: win.pool, creator: row.launcher };
   } else try {
     st = await stateOf(row.mint, { fresh: forgetKeys.delete(row.mint) });
