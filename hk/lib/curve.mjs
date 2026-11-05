@@ -44,8 +44,8 @@ export const pumpParamsKey = (p) => ({ virtualSol: p.virtualSol, virtualTokens: 
 export const SIZE_FRACTIONS = [0.35, 0.5, 0.7];
 /** The size the create form selects by default (the 0.35 share: 29.7 SOL, ≈ $11k cap at $100/SOL). */
 export const DEFAULT_SIZE_FRACTION = 0.35;
-/** Small fixed sizes offered besides the shares: 10 SOL raises to a 49.7 SOL cap (≈ $5k at $100/SOL; operator, 25 Oct 2026). */
-export const SMALL_SIZES = [10];
+/** Small fixed sizes offered besides the shares: 3 SOL raises to a 33.8 SOL cap (the size our mainnet tests migrated; operator, 5 Nov 2026), 10 SOL to a 49.7 SOL cap (≈ $5k at $100/SOL; operator, 25 Oct 2026). */
+export const SMALL_SIZES = [3, 10];
 /** Extra sizes for our own tests (TEST_SIZES=1,2): shown while set, kept recognised after. */
 export const testSizes = () => String(process.env.TEST_SIZES ?? "").split(",").map(Number).filter((n) => n > 0);
 export const sizeAt = (p, f) => Math.floor(p.completionSol * f * 10) / 10;

@@ -12,7 +12,7 @@ const Table = ({ head, rows }) => <div className="doc-table"><table><thead><tr>{
 function Caps({ cfg }) {
   const sizes = (cfg.window?.sizes || []).filter((s) => s.available && s.capSol);
   const usd = (sol) => (cfg.solUsd ? `$${((sol * cfg.solUsd) / 1000).toFixed(1)}K` : `${Math.round(sol)} SOL`);
-  return <Table head={['Curve', 'Migrates at about']} rows={sizes.length ? sizes.map((s) => [`${s.sizeSol} SOL`, usd(s.capSol)]) : [['10 SOL', '49.7 SOL market cap'], ['29.7 SOL', '110.7 SOL market cap'], ['42.5 SOL', '163.3 SOL market cap'], ['59.5 SOL', '248.8 SOL market cap']]} />;
+  return <Table head={['Curve', 'Migrates at about']} rows={sizes.length ? sizes.map((s) => [`${s.sizeSol} SOL`, usd(s.capSol)]) : [['3 SOL', '33.8 SOL market cap'], ['10 SOL', '49.7 SOL market cap'], ['29.7 SOL', '110.7 SOL market cap'], ['42.5 SOL', '163.3 SOL market cap'], ['59.5 SOL', '248.8 SOL market cap']]} />;
 }
 
 const PAGES = [
